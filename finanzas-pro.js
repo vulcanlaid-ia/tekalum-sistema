@@ -78,6 +78,7 @@ const resols=()=>CONT.resoluciones||[];
 const resolVigente=(tipo,f)=>resols().find(r=>r.tipo===tipo&&r.activa!==false&&(!r.vigHasta||S_(f||hoy())<=r.vigHasta)&&(+r.sig||+r.desde)<=+r.hasta);
 // toma el siguiente número (de la resolución DIAN si la facturación electrónica está activa)
 async function tomarNumero(tipo,f){
+  if(modo==="compartido")return {num:"Pendiente"}; // El servidor numera al confirmar el documento, dentro de la transacción.
   const usados=new Set([...store.ventas.map(v=>v.num),...store.notasdoc.map(n=>n.num)].filter(Boolean));
   if(tipo==="FV"&&feOn()){const r=resolVigente("FV",f);if(!r)throw {msg:"No hay una resolución de facturación vigente. Regístrala en Configuración › Facturación electrónica."};
     let n=Math.max(+r.sig||0,+r.desde||1);while(usados.has(r.pref+n))n++;if(n>+r.hasta)throw {msg:"Se acabó el rango de la resolución "+r.numero+". Solicita una nueva a la DIAN."};
@@ -495,7 +496,8 @@ function validarVenta(v,contab){const t=calcVenta(v);if(!S_(v.cliente).trim())th
   if(t.L.some(l=>l.base<0))throw {msg:"Hay una línea con valor negativo"};if(contab&&mesCerrado(v.f))throw {msg:mesLargo(S_(v.f).slice(0,7))+" está cerrado en Contabilidad."};
   if(contab&&feOn()){const c=terceroDe(v.cliente)||{};const f=[!c.doc&&"documento",!c.email&&"correo"].filter(Boolean);if(f.length)throw {msg:"Para la factura electrónica, al cliente le falta: "+f.join(", ")+". Complétalo en Terceros."}}
   return t}
-async function guardarVenta(contab){
+async function guardarVenta(contab){return atomico(()=>guardarVentaDentro(contab))}
+async function guardarVentaDentro(contab){
   const v=clone(vDraft),f=formaDe(v.forma),t=validarVenta(v,contab);
   v.venc=f.tipo==="credito"?(v.venc||sumaDias(v.f,f.dias)):"";v.lineas=v.lineas.filter(l=>S_(l.desc).trim()||+l.pu);v.ret=(v.ret||[]).filter(r=>r.imp);
   v.totales={base:t.base,iva:t.iva,total:t.total,ret:t.ret,neto:t.neto};

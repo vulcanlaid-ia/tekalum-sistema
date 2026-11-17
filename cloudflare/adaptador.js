@@ -9,23 +9,26 @@
   const cab=()=>({"content-type":"application/json","x-usuario":LS.get("vye-usuario")||"","x-clave":LS.get("vye-clave")||"","x-sid":SID});
 
   async function api(ruta,opts={}){
-    const r=await fetch("/api"+ruta,{...opts,headers:cab()});
+    let r;
+    try{r=await fetch("/api"+ruta,{...opts,headers:cab()})}
+    catch(e){e.code="unavailable";throw e}
     if(r.status===401){pedirAcceso(LS.get("vye-clave")?"Usuario o contraseña incorrectos.":"");const e=new Error("clave");e.code="not_granted";throw e}
     if(!r.ok){
       // 403 = el rol no tiene permiso: el servidor explica por qué y la pantalla lo muestra tal cual
-      let msg="";if(r.status===403){try{msg=(await r.json()).error||""}catch{}}
-      const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":r.status===403?"permission_denied":"unavailable";if(msg)e.msg=msg;throw e}
+      let msg="";if([400,403,409].includes(r.status)){try{msg=(await r.json()).error||""}catch{}}
+      const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":r.status===403?"permission_denied":r.status===409?"conflict":"unavailable";if(msg)e.msg=msg;throw e}
     return r.json();
   }
   function entregar(s){
     if(!cache)return;
     const filas=cache[s.col]||[];
-    if(s.tipo==="doc"){const d=filas.find(x=>x.id===s.id);s.cb({id:s.id,exists:!!d,data:()=>d?d.data:undefined,metadata:{fromCache:false,hasPendingWrites:false}});return}
+    if(s.tipo==="doc"){const d=filas.find(x=>x.id===s.id);s.cb({id:s.id,exists:!!d,data:()=>d?copia(d.data):undefined,metadata:{fromCache:false,hasPendingWrites:false}});return}
     const docs=filas.map(x=>({id:x.id,exists:true,data:()=>x.data,metadata:{fromCache:false,hasPendingWrites:false}}));
     if(s.orden){const [f,dir]=s.orden,m=dir==="desc"?-1:1;docs.sort((a,b)=>{const va=a.data()[f],vb=b.data()[f];return va===vb?0:va==null?1:vb==null?-1:(va<vb?-1:1)*m})}
     s.cb({docs,size:docs.length,empty:!docs.length,docChanges:()=>[],metadata:{fromCache:false,hasPendingWrites:false}});
   }
   function refrescar(){
+    if(transaccion)return Promise.resolve();
     if(cargando)return cargando;
     cargando=(async()=>{
       try{cache=await api("/all");fallos=0;subs.forEach(entregar)}
@@ -37,21 +40,69 @@
   // aplica el cambio en la copia local para que la pantalla responda al instante
   function local(col,id,data){
     cache ||= {};const f=(cache[col] ||= []),i=f.findIndex(x=>x.id===id);
-    if(data===null){if(i>=0)f.splice(i,1)}else if(i>=0)f[i]={id,data};else f.push({id,data});
+    if(data===null){if(i>=0)f.splice(i,1)}else if(i>=0)f[i]={id,data:copia(data)};else f.push({id,data:copia(data)});
     subs.forEach(entregar);
   }
   function sub(s){subs.push(s);if(cache)setTimeout(()=>entregar(s),0);else refrescar();return ()=>{const i=subs.indexOf(s);if(i>=0)subs.splice(i,1)}}
   const nuevoId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+
+  let transaccion = null, colaEscrituras = Promise.resolve();
+  function enCola(fn){const p=colaEscrituras.then(fn);colaEscrituras=p.catch(()=>{});return p}
+  const copia = (x) => JSON.parse(JSON.stringify(x));
+  function preparar(col, id, data) {
+    if (!transaccion || transaccion.fase !== "preparando") throw Object.assign(new Error("Hay una operación guardándose. Espera a que termine."), { msg: "Hay una operación guardándose. Espera a que termine." });
+    const clave = col + "/" + id, existe = transaccion.operaciones.get(clave);
+    const previo = transaccion.antes?.[col]?.find((x) => x.id === id)?.data || null;
+    transaccion.operaciones.set(clave, { col, id, data: data === null ? null : copia(data), previo: existe ? existe.previo : copia(previo) });
+    local(col, id, data);
+    return data;
+  }
+  async function guardarRemoto(col, id, data) {
+    if (transaccion) return preparar(col, id, data);
+    return enCola(async()=>{
+    if(cargando)await cargando;
+    const previo = cache?.[col]?.find((x) => x.id === id)?.data || null;
+    const body = { clave: crypto.randomUUID(), operaciones: [{ col, id, data, previo: copia(previo) }] };
+    const r = await enviarLote(body);
+    const doc = r.documentos[0]; local(col, id, doc.data); return doc.data;
+    });
+  }
+  async function enviarLote(body) {
+    // Reintentar el mismo identificador y payload: una respuesta perdida no duplica la operación.
+    for (let i = 0; ; i++) {
+      try { return await api("/lote", { method: "POST", body: JSON.stringify(body) }); }
+      catch (e) { if (i || e.code !== "unavailable") throw e; }
+    }
+  }
+  function atomic(fn){if(transaccion)return Promise.reject(Object.assign(new Error("Ya hay una operación en curso."),{msg:"Ya hay una operación en curso."}));return enCola(()=>atomicDentro(fn))}
+  async function atomicDentro(fn) {
+    if(cargando)await cargando;
+    if (transaccion) throw Object.assign(new Error("Ya hay una operación en curso."), { msg: "Ya hay una operación en curso." });
+    const antes = copia(cache || {}), tx = { antes, operaciones: new Map(), fase: "preparando" };
+    const bloqueo = document.createElement("div");
+    bloqueo.setAttribute("role", "status"); bloqueo.textContent = "Guardando operación…";
+    bloqueo.style.cssText = "position:fixed;inset:0;z-index:9999;background:#ffffffcc;display:grid;place-items:center;font:600 18px system-ui";
+    document.body.appendChild(bloqueo); transaccion = tx;
+    try {
+      const resultado = await fn(); tx.fase = "guardando";
+      if (tx.operaciones.size) {
+        const r = await enviarLote({ clave: crypto.randomUUID(), operaciones: [...tx.operaciones.values()] });
+        for (const d of r.documentos) local(d.col, d.id, d.data);
+      }
+      return resultado;
+    } catch (e) { cache = antes; subs.forEach(entregar); throw e; }
+    finally { transaccion = null; bloqueo.remove(); }
+  }
 
   function docRef(col,id){
     const ruta=`/docs/${enc(col)}/${enc(id)}`;
     return {id,path:col+"/"+id,
       async get(){
         if(col==="archivos_img"){const r=await api(ruta).catch(()=>null);return {id,exists:!!r,data:()=>r?.data,metadata:{}}}
-        await refrescar();const d=(cache?.[col]||[]).find(x=>x.id===id);return {id,exists:!!d,data:()=>d?.data,metadata:{}}},
-      async set(data){const body=JSON.parse(JSON.stringify(data));await api(ruta,{method:"PUT",body:JSON.stringify(body)});local(col,id,body)},
-      async update(data){const r=await api(ruta,{method:"PATCH",body:JSON.stringify(data)});local(col,id,r.data)},
-      async delete(){await api(ruta,{method:"DELETE"});local(col,id,null)},
+        await refrescar();const d=(cache?.[col]||[]).find(x=>x.id===id);return {id,exists:!!d,data:()=>d?copia(d.data):undefined,metadata:{}}},
+      async set(data){return guardarRemoto(col,id,copia(data))},
+      async update(data){const previo=cache?.[col]?.find(x=>x.id===id)?.data;if(!previo)throw new Error("Recarga el documento antes de editarlo");return guardarRemoto(col,id,{...previo,...data})},
+      async delete(){return guardarRemoto(col,id,null)},
       onSnapshot(cb,err){return sub({tipo:"doc",col,id,cb,err})}};
   }
   function colRef(col,orden){
@@ -62,7 +113,7 @@
       async get(){await refrescar();let snap;const s={tipo:"col",col,orden,cb:x=>snap=x};entregar(s);return snap},
       onSnapshot(cb,err){return sub({tipo:"col",col,orden,cb,err})}};
   }
-  const db={doc(p){const a=p.split("/");return docRef(a.slice(0,-1).join("/"),a[a.length-1])},collection:p=>colRef(p)};
+  const db={atomic,get enTransaccion(){return !!transaccion},doc(p){const a=p.split("/");return docRef(a.slice(0,-1).join("/"),a[a.length-1])},collection:p=>colRef(p)};
 
   // Usuario: el nombre sale de la cuenta con la que se entra (el administrador lo cambia en Usuarios y actividad)
   const nombre=()=>sesion?.nombre||LS.get("vye-nombre-cuenta")||LS.get("vye-usuario")||"";

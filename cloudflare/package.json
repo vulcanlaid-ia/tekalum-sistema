@@ -3,5 +3,10 @@
   "private": true,
   "dependencies": {
     "@anthropic-ai/sdk": "^1.6.0"
+  },
+  "scripts": {
+    "build": "node construir.js",
+    "pretest": "node construir.js",
+    "test": "node prueba-integridad.mjs && node prueba-permisos.mjs && node prueba-servidor.mjs"
   }
 }
