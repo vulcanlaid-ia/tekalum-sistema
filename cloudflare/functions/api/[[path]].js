@@ -17,6 +17,112 @@ import Anthropic from "@anthropic-ai/sdk";
 const COLECCIONES = ["nominas", "cotizaciones", "bodega", "maquinaria", "proveedores", "config", "personal", "ordenes", "retazos", "chatarra", "caja", "auditoria", "archivos", "archivos_img", "compras", "egresos", "inversion", "aprendizaje", "referencias", "conjuntos", "sistemas", "personalizadas", "ingresos", "cuentas", "traslados", "asientos", "terceros", "ventas", "notasdoc", "items", "publicas"];
 // Registros que solo se pueden crear: no se modifican ni se borran (historial inalterable)
 const SOLO_AGREGAR = ["auditoria", "caja", "chatarra"];
+
+// ---------- Candado de meses cerrados y balance de asientos, también en el servidor ----------
+// El navegador (finanzas-pro2.js "guardián" y finanzas-pro3.js para nóminas) ya bloquea esto, pero esas reglas
+// son JavaScript del navegador: una petición hecha directo a la API las salta. Aquí se repiten las mismas reglas
+// (mismas fechas, mismas excepciones) para que valgan también si alguien llama a la API sin pasar por la pantalla.
+const S_ = (s) => String(s ?? "");
+const mesDe = (f) => S_(f).slice(0, 7);
+async function leerCont(env) {
+  const fila = await env.DB.prepare("SELECT data FROM docs WHERE col = 'config' AND id = 'contable'").first().catch(() => null);
+  try { return fila ? JSON.parse(fila.data) : {}; } catch { return {}; }
+}
+const cerradoCon = (CONT, f) => !!f && !!(CONT.cierres && CONT.cierres[mesDe(f)]);
+// mismas fechas relevantes que fechasDoc() del navegador (finanzas-pro2.js), para las colecciones portadas aquí
+const fechasDocSrv = (col, d) => !d ? [] :
+  col === "egresos" ? [d.f, d.pagado !== false && d.fPago, d.fAnticipo, ...((d.abonos || []).map((a) => a.f))] :
+  col === "ingresos" ? [d.f, d.fCobro] :
+  col === "maquinaria" ? [d.contab ? d.fAdq : "", d.baja?.f] :
+  col === "cuentas" ? [d.fIni] :
+  [d.f];
+// mismos campos que se pueden tocar aun con la fecha base en un mes cerrado (permitidos, en finanzas-pro2.js)
+const PERMITIDOS_CERRADO = {
+  egresos: ["pagado", "fPago", "fPagoReg", "cuenta", "pagoId", "abonos", "anticipo", "fAnticipo"],
+  ingresos: ["cobrado", "fCobro", "cuenta"],
+  maquinaria: ["baja", "notas", "estado", "foto", "marca", "ubicacion"],
+};
+const COLS_CIERRE = ["ingresos", "egresos", "traslados", "inversion", "asientos", "ventas", "notasdoc", "maquinaria", "cuentas"];
+// mismos campos "volátiles" que no cuentan como cambio real (VOLATILES en finanzas-pro2.js)
+const VOLATILES_SRV = new Set(["_editadoPor", "_editadoNombre", "_editadoF", "_creadoPor", "_creadoNombre", "_creadoF", "editado", "editadoPor", "vistas", "vistaCliente", "ultimaVista", "token", "enviada", "fe", "eventos"]);
+function limpioSrv(o) {
+  const r = {};
+  for (const [k, v] of Object.entries(o || {})) if (!VOLATILES_SRV.has(k) && k !== "id") r[k] = v;
+  return r;
+}
+// comparación de dos documentos que no dependa del orden en que quedaron las llaves (JSON.stringify sí lo distingue,
+// y sellar() agrega _editadoPor/_editadoNombre/_editadoF al final del documento nuevo, en un orden que no tenía el viejo)
+function canon(o) {
+  if (Array.isArray(o)) return "[" + o.map(canon).join(",") + "]";
+  if (o && typeof o === "object") {
+    const claves = Object.keys(o).filter((k) => o[k] !== undefined).sort();
+    return "{" + claves.map((k) => JSON.stringify(k) + ":" + canon(o[k])).join(",") + "}";
+  }
+  return JSON.stringify(o);
+}
+// un asiento manual (comprobante contable) debe tener al menos 2 líneas y cuadrar débito con crédito, redondeando cada línea
+// (igual que asientosTodos() en cotizador.html: si se compara la suma sin redondear, un asiento puede "cuadrar" y quedar
+// descuadrado en el libro mayor al redondear línea por línea)
+function balanceValido(data) {
+  if (!data || data.estado === "borrador") return true;
+  const L = (data.lineas || []).filter((l) => Math.round(l?.d || 0) || Math.round(l?.c || 0));
+  if (L.length < 2) return false;
+  const D = L.reduce((s, l) => s + Math.round(l.d || 0), 0), C = L.reduce((s, l) => s + Math.round(l.c || 0), 0);
+  return D === C && D > 0;
+}
+// data === null  →  es un borrado. previo es el documento tal como estaba guardado (o null si es nuevo).
+async function revisarCierreServidor(env, col, data, previo) {
+  if (col === "asientos" && data && !balanceValido(data))
+    return "El asiento debe tener al menos dos líneas y cuadrar débitos con créditos (o guardarlo como borrador).";
+  if (col === "nominas") return revisarNominaServidor(await leerCont(env), data, previo);
+  if (!COLS_CIERRE.includes(col)) return null;
+  const CONT = await leerCont(env);
+  const cerrado = (f) => cerradoCon(CONT, f);
+  if (!previo && data) {
+    const f = fechasDocSrv(col, data).find((x) => x && cerrado(x));
+    if (f) return "Ese mes está cerrado en Contabilidad: no se pueden registrar movimientos nuevos ahí. Pide que lo reabran.";
+    return null;
+  }
+  if (previo && !data) {
+    const f = fechasDocSrv(col, previo).find((x) => x && cerrado(x));
+    if (f) return "Ese mes está cerrado en Contabilidad: no se puede borrar.";
+    return null;
+  }
+  if (!previo || !data) return null;
+  const fOld = fechasDocSrv(col, previo).filter(Boolean), fNew = fechasDocSrv(col, data).filter(Boolean);
+  const fBase = [previo.f];
+  if (fBase.some(cerrado)) {
+    const a = limpioSrv(previo), b = limpioSrv(data);
+    const cambios = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => JSON.stringify(a[k] ?? null) !== JSON.stringify(b[k] ?? null));
+    const permitidos = PERMITIDOS_CERRADO[col] || [];
+    const malos = cambios.filter((k) => !permitidos.includes(k));
+    if (malos.length) return "Ese mes está cerrado en Contabilidad: no se puede cambiar (" + malos.slice(0, 3).join(", ") + "). Pide que lo reabran.";
+  }
+  const nuevas = fNew.filter((f) => !fOld.includes(f));
+  if (nuevas.some(cerrado)) return "No se puede registrar un pago o movimiento con fecha de un mes cerrado.";
+  return null;
+}
+// mismo candado de finanzas-pro3.js para la colección "nominas"
+function revisarNominaServidor(CONT, data, previo) {
+  const cerr = (f) => cerradoCon(CONT, f);
+  if (data === null) {
+    if (previo && previo.estado !== "borrador" && previo.tipo === "nomina") return "Una nómina contabilizada no se borra: se anula.";
+    if (previo && previo.tipo !== "nomina" && cerr(previo.f)) return "Ese mes está cerrado: no se puede borrar.";
+    return null;
+  }
+  if (previo && previo.estado === "contabilizada" && cerr(previo.f)) {
+    // comparación sin depender del orden de las llaves: sellar() agrega _editadoPor/_editadoNombre/_editadoF
+    // en el documento nuevo en un orden distinto al que tenía el documento viejo, y JSON.stringify sí distingue ese orden
+    const a = canon({ ...previo, pagos: undefined, _editadoF: undefined, _editadoPor: undefined, _editadoNombre: undefined });
+    const b = canon({ ...data, pagos: undefined, _editadoF: undefined, _editadoPor: undefined, _editadoNombre: undefined });
+    if (a !== b) return "Ese mes está cerrado en Contabilidad: esta nómina no se puede cambiar.";
+  }
+  const nuevosPagos = (data.pagos || []).filter((p) => !(previo?.pagos || []).some((o) => o.id === p.id));
+  if (nuevosPagos.some((p) => cerr(p.f))) return "No se puede registrar un pago con fecha de un mes cerrado.";
+  if ((!previo || previo.estado !== "contabilizada") && data.estado !== "borrador" && cerr(data.f))
+    return "Ese mes está cerrado en Contabilidad. Pide que lo reabran.";
+  return null;
+}
 const ID_VALIDO = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
 const MAX_BYTES = 1024 * 1024;
 
@@ -268,6 +374,8 @@ export async function onRequest({ request, env, params }) {
       const fila0 = col === "archivos_img" ? null : await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
       const previo = fila0 ? JSON.parse(fila0.data) : null;
       if (col !== "config") sellar(data, previo, sesion);
+      const errCierre = await revisarCierreServidor(env, col, data, previo);
+      if (errCierre) return json({ error: errCierre }, 403);
       const anotarPut = () => anotar(env, request, sesion, col === "archivos_img" ? "subió" : accionDe(previo), col, id, col === "archivos_img" ? "Imagen" : resumenDe(col, data));
       if (soloAgregar) {
         // INSERT sin ON CONFLICT: si el registro ya existe, la base lo rechaza
@@ -286,13 +394,20 @@ export async function onRequest({ request, env, params }) {
       const fila = await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
       if (!fila) return json({ error: "El documento no existe" }, 400);
       const previo = JSON.parse(fila.data), data = col === "config" ? { ...previo, ...cambios } : sellar({ ...previo, ...cambios }, previo, sesion);
+      const errCierre = await revisarCierreServidor(env, col, data, previo);
+      if (errCierre) return json({ error: errCierre }, 403);
       await guardar(data);
       await anotar(env, request, sesion, "editó", col, id, resumenDe(col, data));
       return json({ ok: true, data });
     }
     if (metodo === "DELETE") {
       const fila = await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
-      if (fila) await anotar(env, request, sesion, "borró", col, id, col === "archivos_img" ? "Imagen" : resumenDe(col, JSON.parse(fila.data)));
+      const previo = fila ? JSON.parse(fila.data) : null;
+      if (previo) {
+        const errCierre = await revisarCierreServidor(env, col, null, previo);
+        if (errCierre) return json({ error: errCierre }, 403);
+      }
+      if (fila) await anotar(env, request, sesion, "borró", col, id, col === "archivos_img" ? "Imagen" : resumenDe(col, previo));
       await env.DB.prepare("DELETE FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).run();
       return json({ ok: true });
     }

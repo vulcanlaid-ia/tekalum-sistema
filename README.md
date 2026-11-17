@@ -77,10 +77,45 @@ puede verificar y corregir cada uno.
 
 ## Lo que falta / está apagado a propósito
 
-- Facturación electrónica y nómina electrónica: el código y los datos están
-  listos, pero el envío a la DIAN está apagado hasta terminar el trámite de
-  habilitación.
+- **Facturación y nómina electrónica**: el modelo de datos y la pantalla están
+  listos (número de resolución, catálogo de impuestos, cola `estado:"pendiente"`
+  por documento), pero **la transmisión al proveedor tecnológico de la DIAN no
+  está construida todavía** — no es solo un interruptor apagado, es un paso que
+  falta programar en cuanto haya un proveedor tecnológico elegido.
 - Varias empresas (multi-tenant) y NIIF: no implementado.
 - Varios porcentajes de ley (ARL, exoneración de parafiscales, tarifas de
   ReteICA por ciudad) están con valores de referencia 2026 y pendientes de
   confirmar con el contador.
+- Numeración de comprobantes y operaciones con varios documentos (por ejemplo,
+  causar una factura de compra en varios gastos) no son atómicas: si la
+  conexión se cae a la mitad, puede quedar una operación a medio registrar, o
+  dos usuarios conectados al mismo tiempo podrían calcular el mismo número de
+  comprobante. Con el tamaño actual del equipo (2 a 4 personas) el riesgo es
+  bajo, pero no está resuelto a nivel de diseño.
+- Los roles (`admin`, `usuario`, `proyector`, `contador`, `auxiliar`) existen
+  como etiqueta y solo se usan para ocultar la pantalla "Usuarios y
+  actividad". No hay todavía un modelo de permisos que decida, por ejemplo,
+  qué puede o no cambiar un "auxiliar contable". El servidor sí aplica ya (ver
+  abajo) los mismos candados de integridad que la interfaz, independientemente
+  del rol; lo que falta es decidir y construir *quién puede hacer qué*.
+
+## Auditoría de otra IA (17 nov 2026) — qué se confirmó y qué se corrigió
+
+Una segunda IA auditó este repositorio y hay un resumen con la verificación de
+cada hallazgo (cuáles eran reales, cuáles no, y qué se corrigió) en
+`AUDITORIA-2026-11-17.md`. En resumen, se confirmaron y corrigieron dos fallos
+reales:
+
+1. El comprobante contable manual validaba la suma de los débitos y créditos
+   **sin redondear**, pero el libro mayor redondea cada línea por separado —
+   un asiento con centavos podía "cuadrar" al guardarse y quedar descuadrado
+   después. Corregido en `cotizador.html` (función `nota-guardar`).
+2. Los candados de meses cerrados y el balance de un asiento solo se
+   verificaban en el navegador (`finanzas-pro2.js`/`finanzas-pro3.js`): una
+   petición hecha directo a la API los podía saltar, sin importar el rol de la
+   cuenta. Se agregó la misma verificación en el servidor
+   (`cloudflare/functions/api/[[path]].js`), probada contra el manejador real
+   con una base de datos simulada.
+
+No se encontró ninguna razón técnica para cambiar de sistema o migrar a otro
+ERP: todo lo confirmado se corrige dentro del código actual.

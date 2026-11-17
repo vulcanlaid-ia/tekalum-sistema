@@ -31,8 +31,10 @@ ${app}
 `;
 
 fs.mkdirSync(path.join(__dirname, "public"), { recursive: true });
-// datos reales que la función /api carga la primera vez (los mismos de la versión de Netlify)
-fs.copyFileSync(path.join(__dirname, "..", "netlify", "servidor", "datos-iniciales.mjs"), path.join(__dirname, "datos-iniciales.mjs"));
+// En el sistema real, aquí se copian los datos reales que la función /api carga la primera vez
+// (equipos, proveedores, compras). En este repositorio de auditoría ese archivo no está —tiene datos
+// reales de la empresa—, así que se usa el vacío que sí está en el repo.
+fs.copyFileSync(path.join(__dirname, "datos-iniciales-vacio.mjs"), path.join(__dirname, "datos-iniciales.mjs"));
 fs.writeFileSync(path.join(__dirname, "public", "index.html"), html);
 // app instalable: manifiesto, íconos y service worker (carpeta app/)
 for (const f of fs.readdirSync(path.join(__dirname, "app")))

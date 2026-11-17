@@ -6483,8 +6483,9 @@ document.addEventListener("click",async e=>{
     case "nota-cerrar":ctb.nota=null;render();break;
     case "nota-linea":ctb.nota.lineas.push({cta:"",d:"",c:"",det:"",cc:""});render();break;
     case "nota-quitar":if(ctb.nota.lineas.length>2){ctb.nota.lineas.splice(+d.i,1);render()}break;
-    case "nota-guardar":{const n=ctb.nota,borr=!!d.borrador,L=n.lineas.filter(l=>String(l.cta).trim()&&(+l.d||+l.c)),D=L.reduce((s,l)=>s+(+l.d||0),0),C=L.reduce((s,l)=>s+(+l.c||0),0);
-      if(!n.f){toast("Elige la fecha");return}if(!borr&&(L.length<2||Math.round(D)!==Math.round(C)||!D)){toast("El asiento debe tener al menos dos líneas y cuadrar débitos con créditos (o guárdalo como borrador)");return}
+    case "nota-guardar":{const n=ctb.nota,borr=!!d.borrador,L=n.lineas.filter(l=>String(l.cta).trim()&&(+l.d||+l.c)),D=L.reduce((s,l)=>s+Math.round(+l.d||0),0),C=L.reduce((s,l)=>s+Math.round(+l.c||0),0);
+      // se compara línea por línea ya redondeada (como lo hace asientosTodos): si se compara la suma sin redondear, un asiento con centavos puede "cuadrar" aquí y quedar descuadrado en el libro mayor
+      if(!n.f){toast("Elige la fecha");return}if(!borr&&(L.length<2||D!==C||!D)){toast("El asiento debe tener al menos dos líneas y cuadrar débitos con créditos (o guárdalo como borrador)");return}
       const old=n.editId?store.asientos.find(x=>x.id===n.editId):null,num=borr?(old?.num||null):(old?.num||Math.max(0,...store.asientos.map(x=>+x.num||0))+1);
       await guardarDoc("asientos",old?old.id:null,{...(old||{}),f:n.f,clase:n.clase||"Nota de contabilidad",ref:String(n.ref||"").trim(),concepto:String(n.concepto||"").trim()||"Nota contable",tercero:String(n.tercero||"").trim(),lineas:(borr?n.lineas.filter(l=>String(l.cta).trim()||+l.d||+l.c):L).map(l=>({cta:String(l.cta).trim(),d:+l.d||0,c:+l.c||0,det:l.det||"",cc:l.cc||"",ter:String(l.ter||"").trim()})),num,estado:borr&&!old?.num?"borrador":"contabilizado",creado:old?.creado||new Date().toISOString(),por:old?old.por??null:(myId||null)});
       ctb.nota=null;finModal=null;toast(borr&&!num?"Borrador guardado":numNC({num})+(old?" actualizado":" contabilizado"));render();break}
