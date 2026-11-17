@@ -92,12 +92,11 @@ puede verificar y corregir cada uno.
   dos usuarios conectados al mismo tiempo podrían calcular el mismo número de
   comprobante. Con el tamaño actual del equipo (2 a 4 personas) el riesgo es
   bajo, pero no está resuelto a nivel de diseño.
-- Los roles (`admin`, `usuario`, `proyector`, `contador`, `auxiliar`) existen
-  como etiqueta y solo se usan para ocultar la pantalla "Usuarios y
-  actividad". No hay todavía un modelo de permisos que decida, por ejemplo,
-  qué puede o no cambiar un "auxiliar contable". El servidor sí aplica ya (ver
-  abajo) los mismos candados de integridad que la interfaz, independientemente
-  del rol; lo que falta es decidir y construir *quién puede hacer qué*.
+- Permisos por rol: ya están definidos y aplicados en el servidor (ver
+  [ROLES.md](ROLES.md)): contador, auxiliar contable, gestión del taller y
+  gerencia. Lo que queda por decidir es el detalle fino de cada caso a medida
+  que se use (por ejemplo, si el auxiliar debe poder anular sus propios
+  registros del mismo día).
 
 ## Auditoría de otra IA (17 nov 2026) — qué se confirmó y qué se corrigió
 
@@ -110,8 +109,8 @@ reales:
    **sin redondear**, pero el libro mayor redondea cada línea por separado —
    un asiento con centavos podía "cuadrar" al guardarse y quedar descuadrado
    después. Corregido en `cotizador.html` (función `nota-guardar`).
-2. Los candados de meses cerrados y el balance de un asiento solo se
-   verificaban en el navegador (`finanzas-pro2.js`/`finanzas-pro3.js`): una
+2. Los candados de meses cerrados, el balance de un asiento y los permisos por
+   rol solo se verificaban en el navegador (`finanzas-pro2.js`/`finanzas-pro3.js`): una
    petición hecha directo a la API los podía saltar, sin importar el rol de la
    cuenta. Se agregó la misma verificación en el servidor
    (`cloudflare/functions/api/[[path]].js`), probada contra el manejador real
@@ -119,3 +118,15 @@ reales:
 
 No se encontró ninguna razón técnica para cambiar de sistema o migrar a otro
 ERP: todo lo confirmado se corrige dentro del código actual.
+
+## Cómo correr las pruebas del servidor
+
+Necesita Node 22 o más nuevo (usa `node:sqlite`).
+
+```
+cd cloudflare
+npm install
+node construir.js            # deja listo el archivo de datos iniciales vacío
+node prueba-permisos.mjs     # cada rol contra cada tipo de operación (128 casos)
+node prueba-servidor.mjs     # sesiones, bitácora, terceros, colecciones de solo agregar
+```

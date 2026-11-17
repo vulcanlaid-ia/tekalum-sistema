@@ -7,7 +7,7 @@ porque otra IA lo dijera) y, cuando era real, se corrigió y se probó.
 
 | # | Hallazgo reportado | Verificación | Resultado |
 |---|---|---|---|
-| 1 | Sin control de rol en la API para operaciones generales de documentos | **Confirmado.** La API solo exige `rol==="admin"` en dos rutas (`/api/enlinea`, `/api/actividad`). Cualquier cuenta autenticada puede crear/editar/borrar cualquier documento. | No corregido todavía — ver "Pendiente" abajo. No es un bug puntual: falta decidir un modelo de permisos. |
+| 1 | Sin control de rol en la API para operaciones generales de documentos | **Confirmado.** La API solo exige `rol==="admin"` en dos rutas (`/api/enlinea`, `/api/actividad`). Cualquier cuenta autenticada puede crear/editar/borrar cualquier documento. | **Corregido el mismo día**: se definieron los roles (contador, auxiliar contable, gestión, gerencia) y se aplican en el servidor. Ver [ROLES.md](ROLES.md). |
 | 2 | Los candados de mes cerrado solo viven en el navegador | **Confirmado.** El "guardián" (`finanzas-pro2.js`, `finanzas-pro3.js`) es JavaScript del cliente; la API no sabía qué mes estaba cerrado. | **Corregido.** Ver abajo. |
 | 3 | El servidor acepta asientos contables descuadrados | **Confirmado, con la causa exacta.** El comprobante manual comparaba la *suma sin redondear* de débitos y créditos, pero el libro mayor (`asientosTodos()`) redondea *cada línea por separado*. Con débito 1,20 y créditos 0,60+0,60 la suma cuadra (1,20=1,20) pero al redondear cada línea separado da 1 contra 2. | **Corregido** en `cotizador.html` y reforzado en el servidor. |
 | 4 | El envío a la DIAN no es un flujo completo | **Confirmado, y más preciso que como yo lo había descrito.** El botón "Emitir" solo guarda `estado:"pendiente"` en el documento; no existe ningún código que tome esa cola y la transmita a un proveedor tecnológico. | Documentado en el README; no es una corrección de código, es una funcionalidad que falta construir cuando haya proveedor tecnológico elegido. |
@@ -65,10 +65,9 @@ sin importar con qué rol haya entrado.
 
 ## Pendiente (decisiones, no bugs puntuales)
 
-- **Modelo de permisos por rol** (#1): hoy cualquier cuenta autenticada tiene
-  acceso total salvo dos pantallas de administrador. Decidir qué puede hacer
-  cada rol (`usuario`, `proyector`, `contador`, `auxiliar`) es una decisión de
-  negocio, no solo técnica.
+- ~~**Modelo de permisos por rol** (#1)~~: resuelto, ver [ROLES.md](ROLES.md).
+  Probado con `cloudflare/prueba-permisos.mjs` (128 casos, un rol contra cada
+  tipo de operación).
 - **Transacciones multi-documento y numeración atómica** (#5 y #6): quedan
   como riesgo conocido, aceptable con el tamaño de equipo actual, pendientes
   de una revisión de diseño más a fondo si el número de usuarios crece.

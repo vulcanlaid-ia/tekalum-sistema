@@ -107,6 +107,11 @@ button.fin-kpi{cursor:pointer}button.fin-kpi:hover{border-color:#b7c3d4;box-shad
 .px-tr-n{all:unset;cursor:pointer;padding:8px 12px 8px 6px;font:500 13.5px var(--f-body);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px}
 .px-tr-n small{display:block;color:var(--muted);font-size:12px}.px-tr-n em{font-style:normal;font-weight:700;color:var(--accent)}.px-tr.on .px-tr-n{color:var(--accent);font-weight:600}
 .fin-main .fm-bar{display:flex;gap:8px;justify-content:flex-end;margin:0 0 12px}
+/* roles: lo que no corresponde se oculta (el servidor igual lo rechaza) */
+body[data-rolfin="limitado"] :is([data-fi="editar"],[data-fi="borrar"],[data-eg="editar"],[data-eg="borrar"],[data-inv="editar"],[data-inv="borrar"],[data-ctb="cerrar"],[data-ctb="reabrir"],[data-fconc="cerrar"],[data-fconc="reabrir"],[data-fcanio],[data-fprov],[data-ctb="nota-nueva"],[data-ctb="nota-editar"],[data-ctb="nota-anular"],[data-ctb="nota-borrar"],[data-fp="nota-nueva"],[data-fp="nota-borrar"],[data-fp="venta-anular"],[data-cta="basicas"],[data-cta="crear"],[data-cta="inactivar"]),
+body[data-rolfin="lectura"] :is([data-fi="editar"],[data-fi="borrar"],[data-eg="editar"],[data-eg="borrar"],[data-inv="editar"],[data-inv="borrar"],[data-ctb="cerrar"],[data-ctb="reabrir"],[data-fconc="confirmar"],[data-fconc="lote"],[data-fconc="todos"],[data-fconc="ninguno"],[data-fconc="cerrar"],[data-fconc="reabrir"],[data-fconcp],[data-fcanio],[data-fprov],[data-ctb="nota-nueva"],[data-ctb="nota-editar"],[data-ctb="nota-anular"],[data-ctb="nota-borrar"],[data-fp="nota-nueva"],[data-fp="nota-borrar"],[data-fp="venta-anular"],[data-fp="venta-nueva"],[data-fp="venta-editar"],[data-cta="basicas"],[data-cta="crear"],[data-cta="inactivar"],[data-fm-abrir],[data-finqa],[data-fpro],[data-ctb="ter-nuevo"],[data-fnom-nueva],[data-fnom-emp],[data-fnom-pagar],[data-fnom-pila],[data-fnom-prest],[data-fnom-liq],[data-fit-nuevo],[data-fit-ed],[data-ad-nuevo],.subnav [data-fin="nomcfg"]),
+body[data-rolfin="lectura"] .fin-h>.row>.btn.primary{display:none!important}
+body[data-rolfin="lectura"] [data-ctbc="concOk"],body[data-rolfin="lectura"] [data-l]{pointer-events:none}
 .fin-main .panel.ingreso{position:fixed;z-index:62;top:5vh;left:50%;transform:translateX(-50%);width:min(760px,calc(100% - 24px));max-height:90vh;overflow:auto;margin:0;border-radius:16px;box-shadow:0 24px 60px rgba(12,26,51,.35);border:1px solid var(--line);background:#fff}
 .fin-main .fm-velo{all:unset;position:fixed;inset:0;z-index:61;background:rgba(12,26,51,.45);cursor:default}
 .fm-cab{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:-2px 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line)}
@@ -2598,6 +2603,14 @@ const AREAS_FIN=[
   {id:"reportes",t:"Reportes",i:IC.rep,subs:[["reportes","Todos los reportes"],["ctb:estados","Estados financieros"],["ctb:mayor","Libro mayor y auxiliar"],["ctb:prueba","Balance de prueba"],["ctb:portercero","Balance por tercero"],["ctb:flujo","Flujo de efectivo"],["ctb:patrimonio","Patrimonio"],["impuestos","Impuestos"],["ctb:exogena","Exógena"],["auditoria","Auditoría"]]},
   {id:"config",t:"Configuración",sep:1,i:IC.config,subs:[["cfgempresa","Empresa y tributario"],["cfgimpuestos","Impuestos y retenciones"],["cfgpagos","Formas de pago"],["cfgnum","Comprobantes y numeración"],["dian","Facturación electrónica"],["cfgpref","Preferencias"],["migrar","Migrar datos"]]}];
 const AREAS=ES_FIN?AREAS_FIN:AREAS_SIS;
+/* ---------- Roles: qué ve y qué puede hacer cada persona ----------
+   El servidor es el que decide de verdad (cloudflare/functions/api/[[path]].js). Esto solo ordena la pantalla para que
+   cada quien vea lo que le corresponde. En modo simulación se puede ver como otro rol: ?sim=1&rol=auxiliar */
+const ROL_FIN={admin:"total",contador:"total",auxiliar:"limitado",proyector:"lectura",usuario:"sin"}; // acceso a Finanzas
+const rolActual=()=>modo==="local"?(new URLSearchParams(location.search).get("rol")||"admin"):(window.VYE_SESION?.rol||"");
+const nivelFin=()=>ROL_FIN[rolActual()]||"total";
+const areaVisible=a=>{const n=nivelFin();if(!ES_FIN)return !(a.id==="finanzas"&&n==="sin");
+  if(n==="sin")return false;if(a.id==="config")return n==="total";if(a.id==="nomina")return n==="total"||n==="lectura";return true};
 const areaUlt={};
 const vistaActiva=()=>vista==="detalle"?"cotizaciones":vista==="ordenes"&&otTab==="personal"?"personal":ES_FIN&&vista==="contabilidad"?"ctb:"+ctb.tab:vista;
 const areaDe=v=>AREAS.find(a=>a.subs.some(s=>s[0]===v));
@@ -2606,7 +2619,7 @@ const esFinClave=k=>String(k).startsWith("ctb:")||(typeof finVistas!=="undefined
 const navAttr=k=>esFinClave(k)?`data-fin="${esc(k)}"`:`data-go="${esc(k)}"`;
 function renderNav(){
   const v=vistaActiva(),a=areaDe(v);if(a)areaUlt[a.id]=v;
-  $("#nav").innerHTML=AREAS.map(x=>{const n=x.cnt?x.cnt():0;return `${x.sep?'<div class="nav-sep" aria-hidden="true"></div>':""}<button ${x.ventana?'data-fin-ventana="1"':navAttr(areaUlt[x.id]||x.subs[0][0])} title="${esc(x.t)}" ${a?.id===x.id?'aria-current="page"':""}><svg viewBox="0 0 24 24">${x.i}</svg><span class="lbl">${esc(x.t)}</span>${n?`<span class="cnt">${n}</span>`:""}</button>`}).join("");
+  $("#nav").innerHTML=AREAS.filter(areaVisible).map(x=>{const n=x.cnt?x.cnt():0;return `${x.sep?'<div class="nav-sep" aria-hidden="true"></div>':""}<button ${x.ventana?'data-fin-ventana="1"':navAttr(areaUlt[x.id]||x.subs[0][0])} title="${esc(x.t)}" ${a?.id===x.id?'aria-current="page"':""}><svg viewBox="0 0 24 24">${x.i}</svg><span class="lbl">${esc(x.t)}</span>${n?`<span class="cnt">${n}</span>`:""}</button>`}).join("");
 }
 function subnav(){
   const v=vistaActiva(),a=areaDe(v);if(!a)return "";const S=a.subs.filter(s=>s[0]!=="usuarios"||esAdminSis());if(S.length<2)return "";
@@ -2624,9 +2637,11 @@ const CREAR_FIN=[["Ventas",[["factura","Factura de venta",'data-fpro="venta-nuev
   ["Compras y gastos",[["compras","Factura de compra o gasto",'data-acc="factura"'],["dian","Importar facturas DIAN",'data-fin="facturas"'],["sale","Comprobante de egreso",'data-finqa="egreso"'],["soporte","Documento soporte",'data-fin="soporte"']]],
   ["Contabilidad",[["conta","Comprobante contable",'data-acc="nota"'],["traslado","Traslado entre cuentas",'data-finqa="traslado"'],["activos","Activo fijo",'data-acc="activo"']]],
   ["Informes",[["rep","Ver reportes",'data-fin="reportes"'],["impuesto","Impuestos del periodo",'data-fin="impuestos"'],["banco","Conciliación bancaria",'data-fin="ctb:conciliacion"']]]];
-function menuCrear(){const CREAR_G2=ES_FIN?CREAR_FIN:CREAR_G;return `<div class="tb-mega" role="menu">${CREAR_G2.map(([g,L])=>`<div><h4>${g}</h4>${L.map(([i,t,a])=>`<button role="menuitem" class="tb-mi" ${a}><span class="tb-mic">${svgI(i,19)}</span>${t}</button>`).join("")}</div>`).join("")}</div>`}
+function menuCrear(){const n=nivelFin(),CREAR_G2=(ES_FIN?CREAR_FIN:CREAR_G).map(([g,L])=>[g,L.filter(([,,a])=>!(!ES_FIN&&n==="sin")||a.includes("data-go="))
+    .filter(([,,a])=>n!=="limitado"||!(a.includes('data-fpro="nota-nueva"')||a.includes('data-acc="nota"')||a.includes("data-fnom")))]).filter(([,L])=>L.length);
+  return `<div class="tb-mega" role="menu">${CREAR_G2.map(([g,L])=>`<div><h4>${g}</h4>${L.map(([i,t,a])=>`<button role="menuitem" class="tb-mi" ${a}><span class="tb-mic">${svgI(i,19)}</span>${t}</button>`).join("")}</div>`).join("")}</div>`}
 function menuYo(){const S=window.VYE_SESION;return `<div class="tb-menu" role="menu"><div class="tb-yo-h"><b>${esc(S?.nombre||"Modo local")}</b><small>${esc(S?(ROL_NOM[S.rol]||S.rol)+" · "+(S.usuario||""):"Sin guardar en línea")}</small></div>
-  ${ES_FIN?'<button role="menuitem" class="tb-mi" data-fin-sis="1">Ir al sistema completo</button>':'<button role="menuitem" class="tb-mi" data-tb="ventana">Abrir otra ventana del sistema</button><button role="menuitem" class="tb-mi" data-fin-ventana="1">Abrir Finanzas</button>'}${S?`<button role="menuitem" class="tb-mi" data-tb="salir" style="color:var(--bad)">Cerrar sesión</button>`:""}</div>`}
+  ${ES_FIN?'<button role="menuitem" class="tb-mi" data-fin-sis="1">Ir al sistema completo</button>':'<button role="menuitem" class="tb-mi" data-tb="ventana">Abrir otra ventana del sistema</button>'+(nivelFin()==="sin"?"":'<button role="menuitem" class="tb-mi" data-fin-ventana="1">Abrir Finanzas</button>')}${S?`<button role="menuitem" class="tb-mi" data-tb="salir" style="color:var(--bad)">Cerrar sesión</button>`:""}</div>`}
 function pintarBarraNav(){
   const b=$("#barra-nav");if(!b)return;const S=window.VYE_SESION;let al=0;try{al=auditoria().filter(a=>a.nivel!=="info").length}catch{}
   const ini=String(S?.nombre||"T").trim().charAt(0).toUpperCase();
@@ -2634,8 +2649,8 @@ function pintarBarraNav(){
     ${ES_FIN?'<div class="tb-emp">TEKALUM Finanzas <small>Vidrios y Estructuras · Pasto</small></div>':`<button class="tb-ic" data-nav="atras" ${navIdx>0?"":"disabled"} aria-label="Pantalla anterior" title="Atrás">${svgI("izq")}</button><button class="tb-ic" data-nav="adelante" ${navIdx<navMax?"":"disabled"} aria-label="Pantalla siguiente" title="Adelante">${svgI("der")}</button>
     <nav class="migas" aria-label="Dónde estás">${migas()}</nav>`}
     <div class="tb-busca-w"><label class="tb-busca">${svgI("buscar",18)}<input id="tb-q" type="search" placeholder="${ES_FIN?"Buscar terceros, comprobantes, cuentas, facturas…":"Buscar cotizaciones, terceros, cuentas, facturas…"}" autocomplete="off" aria-label="Buscar en todo el sistema"><kbd>Ctrl K</kbd></label><div class="tb-res" id="tb-res" hidden></div></div>
-    <div class="tb-der">${pillEnLinea()}<button class="tb-ic" data-tb="alertas" aria-label="Alertas contables${al?": "+al:""}" title="Alertas contables">${svgI("campana")}${al?`<span class="tb-pto">${al>9?"9+":al}</span>`:""}</button>
-      <div class="tb-w"><button class="btn primary tb-crear" data-tb="crear" aria-expanded="${tbMenu==="crear"}">${svgI("mas",18)}<span>Crear</span></button>${tbMenu==="crear"?menuCrear():""}</div>
+    <div class="tb-der">${pillEnLinea()}${nivelFin()==="sin"?"":`<button class="tb-ic" data-tb="alertas" aria-label="Alertas contables${al?": "+al:""}" title="Alertas contables">${svgI("campana")}${al?`<span class="tb-pto">${al>9?"9+":al}</span>`:""}</button>`}
+      ${ES_FIN&&(nivelFin()==="lectura"||nivelFin()==="sin")?"":`<div class="tb-w"><button class="btn primary tb-crear" data-tb="crear" aria-expanded="${tbMenu==="crear"}">${svgI("mas",18)}<span>Crear</span></button>${tbMenu==="crear"?menuCrear():""}</div>`}
       <div class="tb-w"><button class="tb-yo" data-tb="yo" aria-expanded="${tbMenu==="yo"}" aria-label="Mi cuenta"><span class="tb-av">${esc(ini)}</span><span class="tb-yo-t">${esc(S?.nombre||"Modo local")}<small>${esc(S?ROL_NOM[S.rol]||S.rol:"Sin conexión")}</small></span></button>${tbMenu==="yo"?menuYo():""}</div></div>`;
 }
 function hacerAcceso(k){tbMenu="";
@@ -2667,7 +2682,7 @@ let resBusca=[];
 function cerrarBusca(){const r=$("#tb-res");if(r)r.hidden=true}
 function buscarTodo(q){
   const n=normNom(q),R=[],ok=s=>normNom(s).includes(n);if(n.length<2)return R;
-  for(const a of AREAS)for(const [k,t] of a.subs)if(ok(t)||ok(a.t+" "+t))R.push(["Pantalla",t,a.t,"rep",()=>esFinClave(k)?irFin(k):(k==="personal"?(vista="ordenes",otTab="personal",render()):(vista=k,render()))]);
+  for(const a of AREAS.filter(areaVisible))for(const [k,t] of a.subs)if(ok(t)||ok(a.t+" "+t))R.push(["Pantalla",t,a.t,"rep",()=>esFinClave(k)?irFin(k):(k==="personal"?(vista="ordenes",otTab="personal",render()):(vista=k,render()))]);
   for(const q2 of quotes)if(ok([q2.numero,q2.cliente?.nombre,q2.cliente?.tel].join(" ")))R.push(["Cotización",q2.numero,(q2.cliente?.nombre||"Sin nombre")+" · "+cop(totalDe(q2)),"cot",()=>{vista="detalle";detalleId=q2.id;detalleTab="doc";render();scrollTo(0,0)}]);
   for(const o of store.ordenes||[])if(ok([o.numero,o.cliente,o.titulo].join(" ")))R.push(["Orden de trabajo",o.numero||"OT",o.cliente||o.titulo||"","ot",()=>abrirOT(o.id)]);
   try{for(const t of tercerosTodos())if(ok([t.nombre,t.doc].join(" ")))R.push(["Tercero",t.nombre,t.doc?(t.tipoDoc||"")+" "+t.doc:"Sin documento","terceros",()=>{irFin("ctb:terceros");ctb.buscar=t.nombre;render()}])}catch{}
@@ -2675,8 +2690,8 @@ function buscarTodo(q){
   for(const v of store.ventas||[])if(ok([v.num,v.cliente,(v.lineas||[]).map(l=>l.desc).join(" ")].join(" ")))R.push([v.tipoDoc==="FV"?"Factura de venta":"Cuenta de cobro",(v.num||"Borrador")+" · "+v.cliente,fechaCorta(v.f)+" · "+cop(v.totales?.total||0),"factura",()=>{irFin("ventas");window.FPRO?.ver(v.id)}]);
   for(const it of store.items||[])if(ok([it.cod,it.nombre,it.barras].join(" ")))R.push(["Producto o servicio",it.nombre,(it.cod||"")+" · "+cop(it.precio),"inv",()=>irFin("items")]);
   for(const c of store.compras||[])if(ok([c.documento,c.proveedor,c.nit,c.cufe].join(" ")))R.push(["Factura de compra",(c.documento||"Sin número")+" · "+c.proveedor,fechaCorta(c.fecha)+" · "+cop(c.total),"compras",()=>{irFin("facturas");facVer=c.id;finModal="facver";render()}]);
-  const orden=["Pantalla","Cotización","Orden de trabajo","Tercero","Factura de compra","Cuenta"],out=[];
-  for(const g of orden)out.push(...R.filter(r=>r[0]===g).slice(0,g==="Cuenta"?4:5));
+  const orden=["Pantalla","Cotización","Orden de trabajo","Tercero","Factura de compra","Cuenta"],out=[],sinFin=!ES_FIN&&nivelFin()==="sin";
+  for(const g of orden)if(!(sinFin&&["Tercero","Factura de compra","Cuenta"].includes(g)))out.push(...R.filter(r=>r[0]===g).slice(0,g==="Cuenta"?4:5));
   return out.slice(0,16);
 }
 document.addEventListener("input",e=>{if(e.target.id!=="tb-q")return;const q=e.target.value,r=$("#tb-res");if(!r)return;resBusca=buscarTodo(q);
@@ -2823,12 +2838,13 @@ function ponerBuscadores(){
 }
 function render(){
   aplicarReferencias();
+  document.body.dataset.rol=rolActual();document.body.dataset.rolfin=nivelFin();
   renderNav();
   const m=$("#main");
   if(!SOLO_FIN&&finVistas.includes(vista))vista="accesos";
-  const cuerpo=({finaccesos:vFinAccesos,accesos:vAccesos,reportes:vReportes,activos:vActivos,usuarios:vUsuarios,finresumen:vFinResumen,facturas:vFacturasCompra,auditoria:vAuditoria,dian:vDian,contabilidad:vContabilidad,ingresos:vIngresos,cuentas:vCuentas,cartera:vCartera,clientes:vClientes,personal:vOrdenes,panel:vPanel,nueva:vNueva,cotizaciones:vLista,detalle:vDetalle,produccion:vProduccion,ordenes:vOrdenes,metricas:vMetricas,precios:vPrecios,matriz:vMatriz,egresos:vEgresos,inversion:vInversion,bodega:vBodega,maquinaria:vMaquinaria,compras:vCompras,...FINX}[vista]||(SOLO_FIN?vFinAccesos:vAccesos))();
+  const cuerpo=(SOLO_FIN&&nivelFin()==="sin"?vSinAcceso:{finaccesos:vFinAccesos,accesos:vAccesos,reportes:vReportes,activos:vActivos,usuarios:vUsuarios,finresumen:vFinResumen,facturas:vFacturasCompra,auditoria:vAuditoria,dian:vDian,contabilidad:vContabilidad,ingresos:vIngresos,cuentas:vCuentas,cartera:vCartera,clientes:vClientes,personal:vOrdenes,panel:vPanel,nueva:vNueva,cotizaciones:vLista,detalle:vDetalle,produccion:vProduccion,ordenes:vOrdenes,metricas:vMetricas,precios:vPrecios,matriz:vMatriz,egresos:vEgresos,inversion:vInversion,bodega:vBodega,maquinaria:vMaquinaria,compras:vCompras,...FINX}[vista]||(SOLO_FIN?vFinAccesos:vAccesos))();
   const Aact=areaDe(vistaActiva());
-  m.innerHTML='<div class="navbar" id="barra-nav"></div>'+(SOLO_FIN?(Aact?.id==="finicio"?'<div class="area-t"><h1>Inicio</h1></div>':"")+subnav()+`<section class="fin-main fin-plano">${cuerpo}${fmAbierta()?'<button class="fm-velo" data-fm-cerrar="1" aria-label="Cerrar la ventana" tabindex="-1"></button>':""}</section>`:subnav()+cuerpo);
+  m.innerHTML='<div class="navbar" id="barra-nav"></div>'+(SOLO_FIN?(nivelFin()==="sin"?"":(Aact?.id==="finicio"?'<div class="area-t"><h1>Inicio</h1></div>':"")+subnav())+`<section class="fin-main fin-plano">${cuerpo}${fmAbierta()?'<button class="fm-velo" data-fm-cerrar="1" aria-label="Cerrar la ventana" tabindex="-1"></button>':""}</section>`:subnav()+cuerpo);
   if(vista==="nueva")actualizarCalc();
   pintarFirma();
   registrarNav();pintarBarraNav();ponerBuscadores();guardarPos();aplicarPosY();if(estMenu)posEstPop();if(vista==="nueva"&&modoCot==="obra")pintarTotalesObra();if(vista==="nueva"&&modoCot==="px"){pxPintar3d();pxPintarDibujo();pxResumen()}
@@ -6182,10 +6198,18 @@ document.addEventListener("click",e=>{
 
 /* ===================== Usuarios y actividad (rastreo) ===================== */
 const COL_NOM={cotizaciones:"Cotización",bodega:"Bodega",maquinaria:"Activo fijo",proveedores:"Proveedor",config:"Configuración",personal:"Personal",ordenes:"Orden de trabajo",retazos:"Retazo",chatarra:"Chatarra",caja:"Caja menor",auditoria:"Auditoría",archivos:"Archivo",archivos_img:"Imagen",compras:"Factura de compra",egresos:"Egreso",inversion:"Aporte",aprendizaje:"Aprendizaje del cotizador",referencias:"Referencia",conjuntos:"Conjunto",sistemas:"Sistema",personalizadas:"Cotización personalizada",ingresos:"Ingreso",cuentas:"Cuenta de dinero",traslados:"Traslado",asientos:"Asiento contable",terceros:"Tercero",publicas:"Enlace de cotización",sesion:"Entrada al sistema"};
-const ROL_NOM={admin:"Administrador",usuario:"Usuario",proyector:"Proyecciones",contador:"Contador",auxiliar:"Auxiliar contable"};
+const ROL_NOM={admin:"Administrador",usuario:"Gestión (taller)",proyector:"Gerencia",contador:"Contador",auxiliar:"Auxiliar contable"};
+const ROL_RESUMEN=[
+  ["admin","Administrador","Todo: sistema de gestión, Finanzas, usuarios y la actividad de cada persona."],
+  ["contador","Contador","Finanzas completa. Es el único que cierra y reabre meses y años, hace notas y asientos, liquida la nómina y corrige lo ya registrado. En la gestión solo consulta (y maneja la bodega por las devoluciones a proveedores)."],
+  ["auxiliar","Auxiliar contable","Registra ingresos, egresos, traslados, aportes, ventas y facturas de compra, paga y cobra lo pendiente y concilia el banco. No cambia ni borra lo ya guardado, no cierra meses, no hace notas ni asientos y no ve la configuración. Si se equivoca, avisa al contador."],
+  ["usuario","Gestión (taller)","Cotizador, producción, bodega, proveedores y compras a bodega. No tiene Finanzas (ni nómina, ni salarios); solo la venta de chatarra y la contabilización de sus compras caen solas en Finanzas."],
+  ["proyector","Gerencia","Igual que Gestión en el taller, y además consulta toda Finanzas (incluida la nómina) sin poder registrar ni cambiar nada."]];
+function vSinAcceso(){return `<div class="fin-h"><div><div class="eyebrow">Finanzas</div><h1>Esta parte no es de tu usuario</h1><p>Tu usuario es del sistema de gestión (cotizador, bodega, proveedores y órdenes de trabajo). Finanzas la manejan el contador y las auxiliares contables. Si necesitas ver algo de aquí, pídeselo a ellos.</p></div></div>
+  <div class="row" style="margin-top:14px"><button class="btn primary" data-fin-sis="1">Ir al sistema de gestión</button></div>`}
 const ACC_PILL={creó:"st-aprobada",editó:"st-enviada",borró:"st-perdida",subió:"st-instalada",entró:"st-borrador",vio:"st-produccion",aceptó:"st-aprobada",preguntó:"st-enviada",rechazó:"st-perdida"};
 let actv={datos:null,cargando:false,err:"",dias:7,persona:"",col:"",q:"",t:0};
-const esAdminSis=()=>modo==="local"||window.VYE_SESION?.rol==="admin";
+const esAdminSis=()=>rolActual()==="admin"; // en modo local/simulación es admin salvo que se pida otro rol con ?rol=
 const durTxt=ms=>{const m=Math.round(ms/60000);if(m<1)return "menos de 1 min";if(m<60)return m+" min";const h=Math.floor(m/60);return h+" h"+(m%60?" "+(m%60)+" min":"")};
 async function cargarActividad(){
   if(actv.cargando)return;if(!window.VYE_API){actv.err="local";return}
@@ -6193,6 +6217,9 @@ async function cargarActividad(){
   actv.cargando=false;if(vista==="usuarios")renderSuave();
 }
 setInterval(()=>{if(vista==="usuarios"&&document.visibilityState==="visible")cargarActividad()},30000);
+function tablaRoles(){return `<h3 style="margin:16px 0 6px">Qué puede hacer cada rol</h3>
+    <div class="tbl-wrap"><table class="sin-busca"><thead><tr><th>Rol</th><th>Qué puede hacer</th></tr></thead><tbody>${ROL_RESUMEN.map(([k,n,t])=>`<tr><td><b>${esc(n)}</b><div class="who">${esc(k)}</div></td><td>${esc(t)}</td></tr>`).join("")}</tbody></table></div>
+    <p class="who" style="margin:8px 0 0">Estos permisos los aplica el servidor: aunque alguien intente saltarse la pantalla, no los puede cambiar. El rol de cada cuenta se asigna en Cloudflare (pídeselo a Claude). Para ver cómo ve el sistema cada rol: <b>?sim=1&amp;rol=auxiliar</b> al final del enlace de simulación.</p>`}
 function vUsuarios(){
   if(!esAdminSis())return `<div class="head"><div><div class="eyebrow">Inicio</div><h1>Usuarios y actividad</h1></div></div><div class="empty">Solo el administrador puede ver esta pantalla.</div>`;
   if(!window.VYE_API)actv.err="local";
@@ -6200,7 +6227,7 @@ function vUsuarios(){
   const D=actv.datos,ahora=D?Date.parse(D.ahora):Date.now(),en=s=>ahora-Date.parse(s.hasta)<75000;
   const head=`<div class="head"><div><div class="eyebrow">Inicio</div><h1>Usuarios y actividad</h1><p>Quién está conectado ahora, cuánto tiempo, desde dónde, y todo lo que crea, cambia o borra cada persona. El historial no se puede borrar ni modificar. Solo lo ve el administrador.</p></div>
     <div class="row" style="align-items:flex-end"><label class="f" style="min-width:150px">Periodo<select data-actv="dias">${[[1,"Hoy y ayer"],[7,"Últimos 7 días"],[30,"Últimos 30 días"],[90,"Últimos 90 días"]].map(([v,t])=>`<option value="${v}" ${actv.dias===v?"selected":""}>${t}</option>`).join("")}</select></label><button class="btn" data-actv-act="1">${actv.cargando?"Actualizando…":"Actualizar"}</button></div></div>`;
-  if(actv.err==="local")return head+`<div class="empty">El rastreo funciona en la versión publicada del sistema (con usuario y contraseña).</div>`;
+  if(actv.err==="local")return head+`<div class="empty">El rastreo funciona en la versión publicada del sistema (con usuario y contraseña).</div><div class="panel">${tablaRoles()}</div>`;
   if(actv.err)return head+`<div class="notice">No se pudo cargar la actividad: ${esc(actv.err)}</div>`;
   if(!D)return head+`<div class="empty">Cargando la actividad…</div>`;
   const U=D.usuarios||[],nom=u=>U.find(x=>x.usuario===u)?.nombre||u||"—",S=D.sesiones||[],B=D.bitacora||[];
@@ -6224,6 +6251,7 @@ function vUsuarios(){
     <div class="tbl-wrap"><table class="sin-busca"><thead><tr><th>Usuario</th><th>Nombre que se muestra</th><th>Tipo</th></tr></thead><tbody>
     ${U.map(u=>`<tr><td class="num">${esc(u.usuario)}</td><td><input data-usr-nom="${esc(u.usuario)}" value="${esc(u.nombre)}" style="min-width:160px" aria-label="Nombre de ${esc(u.usuario)}"></td><td>${esc(ROL_NOM[u.rol]||u.rol)}</td></tr>`).join("")}</tbody></table></div>
     <div class="row" style="margin-top:10px"><button class="btn primary" data-usr-guardar="1">Guardar nombres</button></div>
+    ${tablaRoles()}
     <p class="who" style="margin:8px 0 0">Las cuentas y contraseñas se crean en Cloudflare (pídeselas a Claude). Una cuenta compartida por varias personas no deja saber quién hizo cada cosa: lo ideal es una cuenta por persona.</p></div></div>
   <div class="panel"><div class="row" style="justify-content:space-between;align-items:flex-end;gap:10px"><h2 style="margin:0">Historial de actividad (${F.length})</h2>
     <div class="row" style="align-items:flex-end"><label class="f" style="min-width:150px">Persona<select data-actv="persona"><option value="">Todas</option>${U.map(u=>`<option value="${esc(u.usuario)}" ${actv.persona===u.usuario?"selected":""}>${esc(u.nombre)}</option>`).join("")}</select></label>
@@ -6437,7 +6465,10 @@ function hojasContabilidad(){
   const ter=[["Nombre","Tipo de documento","Documento","DV","Tipo","Teléfono","Correo","Dirección","Ciudad"],...tercerosTodos().map(t=>[t.nombre,t.doc?t.tipoDoc||"CC":"",t.doc||"",t.dv||"",[...t.tipos].join(", "),t.tel||"",t.email||"",t.dir||"",t.ciudad||""])];
   return [{nombre:"Libro diario",filas:diario,anchos:[11,12,24,40,26,10,40,15,15],filtroHasta:diario.length},{nombre:"Balance de prueba",filas:prueba,anchos:[10,44,16,16,16,16]},{nombre:"Estado de resultados",filas:er,anchos:[10,44,18,18]},{nombre:"Balance general",filas:bg,anchos:[10,44,18]},{nombre:"Terceros",filas:ter,anchos:[34,10,16,5,24,16,26,30,16]},{nombre:"Inventario (kárdex)",filas:[["Material","Unidad","Cantidad","Costo promedio","Valor"],...kardexTodos().map(k=>[k.info.nombre,k.info.unidad,{v:+k.q.toFixed(3),s:S.num},M(k.prom),M(k.v)])],anchos:[44,10,12,16,16]}];
 }
-async function guardarCont(msg){if(modo==="compartido"){try{await db.doc("config/contable").set(clone(CONT));if(msg)toast(msg)}catch(err){toast("No se pudo guardar ("+(err.code||"error")+")")}}else if(msg)toast(msg)}
+async function guardarCont(msg){if(modo==="compartido"){try{await db.doc("config/contable").set(clone(CONT));if(msg)toast(msg)}catch(err){
+    toast(err?.msg||"No se pudo guardar ("+(err.code||"error")+")");
+    // si el servidor no lo aceptó, la pantalla no debe quedarse mostrando un cambio que no existe: se vuelve a leer lo guardado
+    try{const s=await db.doc("config/contable").get();CONT=s.exists?{...clone(CONT_DEF),...s.data()}:clone(CONT_DEF);render()}catch{}}}else if(msg)toast(msg)}
 // candado de meses cerrados: no se crean, cambian ni borran movimientos con fecha en un mes cerrado (salvo registrar el pago de algo a crédito)
 const COLS_CONT=["ingresos","egresos","traslados","inversion","asientos","ventas","notasdoc"];
 function revisarCierre(col,id,data){
@@ -8072,6 +8103,8 @@ document.addEventListener("change",e=>{
   if(el.dataset.estado){cambiarEstado(el.dataset.estado,el.value)}
 });
 
+// cuando llega la sesión (rol de la cuenta) la pantalla se pinta de nuevo con lo que le corresponde
+window.addEventListener("vye-sesion",()=>{if(modo!=="cargando"){try{render()}catch(e){}}});
 iniciar();
 </script>
 <script src="finanzas-pro.js"></script>

@@ -123,6 +123,157 @@ function revisarNominaServidor(CONT, data, previo) {
     return "Ese mes está cerrado en Contabilidad. Pide que lo reabran.";
   return null;
 }
+
+// ---------- Permisos por rol (lo que cada persona puede hacer, aplicado aquí y no solo en la pantalla) ----------
+// Roles (se asignan en el secreto CUENTAS de Cloudflare):
+//   admin     → todo.
+//   contador  → Finanzas completa, incluido cerrar y reabrir meses y años. Es el único que corrige lo ya registrado.
+//   auxiliar  → Finanzas, pero solo registra: ingresos, egresos, traslados, ventas, compras, conciliar el banco.
+//               No cambia ni borra lo ya guardado (para que nadie "cuadre" números), no cierra, no hace notas ni asientos.
+//   usuario   → sistema de gestión (cotizador, bodega, proveedores, órdenes). Sin acceso a Finanzas; no ve nóminas.
+//   proyector → como "usuario" en la gestión, y Finanzas en solo consulta (incluida la nómina).
+// Niveles por colección:  rw = crear, cambiar y borrar · cu = crear y cambiar · c = solo crear · r = solo leer · - = ni verla.
+// Un "*" al final significa que además aplican condiciones propias (ver condicion()).
+const ROL_TXT = { admin: "Administrador", contador: "Contador", auxiliar: "Auxiliar contable", usuario: "Gestión", proyector: "Gerencia" };
+const G_GESTION = ["cotizaciones", "ordenes", "retazos", "proveedores", "bodega", "aprendizaje", "referencias", "conjuntos", "sistemas", "personalizadas"];
+const G_FIN = ["ingresos", "egresos", "traslados", "inversion", "ventas", "notasdoc", "asientos", "cuentas", "nominas", "personal", "terceros", "items", "compras", "maquinaria"];
+const G_LIBRES = ["archivos", "archivos_img", "publicas"];
+const G_AGREGAR = ["auditoria", "caja", "chatarra"];
+const lote = (cols, nv) => Object.fromEntries(cols.map((c) => [c, nv]));
+const BASE_GESTION = { ...lote(G_GESTION, "rw"), ...lote(G_FIN, "r"), ingresos: "c*", egresos: "c*", compras: "rw*", maquinaria: "rw*", ...lote(G_LIBRES, "rw"), ...lote(G_AGREGAR, "c") };
+const NIVELES = {
+  contador: { ...lote(G_GESTION, "r"), bodega: "rw", ...lote(G_FIN, "rw"), ...lote(G_LIBRES, "rw"), ...lote(G_AGREGAR, "c") },
+  auxiliar: {
+    ...lote(G_GESTION, "r"), ...lote(G_FIN, "r"),
+    ingresos: "c*", egresos: "c*", traslados: "c", inversion: "c", ventas: "cu*", terceros: "cu", items: "c", compras: "rw*", maquinaria: "rw*",
+    ...lote(G_LIBRES, "rw"), ...lote(G_AGREGAR, "c"),
+  },
+  usuario: { ...BASE_GESTION, nominas: "-" },
+  proyector: { ...BASE_GESTION },
+};
+const nivelDe = (rol, col) => (rol === "admin" ? "rw" : NIVELES[rol]?.[col] ?? "r");
+const tablaAcceso = (rol) => Object.fromEntries(COLECCIONES.map((c) => [c, nivelDe(rol, c)]));
+const FIN_SET = new Set(G_FIN);
+// de "personal" (que ahora trae salario, documento, EPS…) el rol de gestión solo ve lo que necesita para asignar órdenes
+const PERSONAL_PUBLICO = ["nombre", "rol", "area", "telefono", "autoriza", "activo", "_creadoPor", "_creadoNombre", "_creadoF", "_editadoPor", "_editadoNombre", "_editadoF"];
+function filtrarLectura(rol, col, filas) {
+  if (rol === "admin") return filas;
+  const nv = nivelDe(rol, col);
+  if (nv === "-") return [];
+  if (col === "personal" && rol === "usuario")
+    return filas.map((f) => ({ id: f.id, data: Object.fromEntries(Object.entries(f.data || {}).filter(([k]) => PERSONAL_PUBLICO.includes(k))) }));
+  return filas;
+}
+
+const msgFijo = (rol) => `Tu rol (${ROL_TXT[rol]}) puede registrar movimientos nuevos, pero no cambiarlos ni borrarlos, para que lo registrado no se altere. Si hay un error, avisa al contador para que lo corrija con una nota o un ajuste.`;
+const msgFin = (rol) => `Tu rol (${ROL_TXT[rol]}) no puede registrar ni cambiar movimientos de Finanzas.`;
+const msgContab = "Este equipo ya está en la contabilidad como activo fijo: su valor, fecha, vida útil o baja los cambia el contador.";
+function msgLectura(rol, col) {
+  if (FIN_SET.has(col) && (rol === "usuario" || rol === "proyector")) return `Tu rol (${ROL_TXT[rol]}) solo puede consultar Finanzas: no puede registrar ni cambiar nada ahí.`;
+  if (rol === "auxiliar" && ["notasdoc", "asientos", "cuentas", "nominas", "personal"].includes(col)) return `Tu rol (${ROL_TXT[rol]}) no hace este movimiento: lo hace el contador (notas, asientos, cuentas, nómina y empleados).`;
+  if (G_GESTION.includes(col)) return `Tu rol (${ROL_TXT[rol]}) solo puede consultar el sistema de gestión (cotizaciones, bodega, proveedores): no puede cambiarlo.`;
+  return `Tu rol (${ROL_TXT[rol]}) solo puede consultar esta información, no cambiarla.`;
+}
+// qué claves cambiaron entre dos versiones de un documento (sin contar los sellos de autor y demás campos que no son contables)
+function cambiosDe(previo, data) {
+  const a = limpioSrv(previo), b = limpioSrv(data);
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => canon(a[k] ?? null) !== canon(b[k] ?? null));
+}
+async function tieneEgresos(env, compraId) {
+  const f = await env.DB.prepare("SELECT 1 AS ok FROM docs WHERE col = 'egresos' AND json_extract(data, '$.compraId') = ?1 LIMIT 1").bind(compraId).first();
+  return !!f;
+}
+const CAMPOS_COBRO = ["cobrado", "causado", "fCobro", "cuenta"];
+const CAMPOS_PAGO = ["pagado", "fPago", "fPagoReg", "cuenta", "pagoId", "abonos", "anticipo", "fAnticipo"];
+const CAMPOS_CAUSA = ["destino", "cat", "venc", "causaModo", "causadaPor", "ctaLineas", "sinConta", "aporteId", "aporteSocio"];
+const CAMPOS_ACTIVO = ["contab", "valor", "fAdq", "vidaAnios", "grupo", "clase", "cantidad", "baja"];
+// reglas propias de cada colección para los roles que no tienen acceso total
+async function condicion(env, rol, col, id, previo, data, borrar) {
+  const nuevo = !previo && !borrar, aux = rol === "auxiliar";
+  const cam = previo && data && !borrar ? cambiosDe(previo, data) : [];
+  switch (col) {
+    case "ingresos":
+      if (nuevo) return aux || data.tipo === "chatarra" ? null : msgFin(rol);   // gestión solo registra la venta de chatarra
+      if (!aux) return msgFin(rol);
+      if (borrar) return msgFijo(rol);
+      if (!cam.length) return null;
+      // cobrar algo que estaba a crédito
+      return previo.cobrado === false && data.cobrado === true && cam.every((k) => CAMPOS_COBRO.includes(k)) ? null : msgFijo(rol);
+    case "egresos":
+      if (nuevo) return aux || data.compraId ? null : msgFin(rol);   // gestión solo contabiliza sus compras a bodega
+      if (!aux) return msgFin(rol);
+      if (borrar) return msgFijo(rol);
+      if (!cam.length) return null;
+      // registrar un pago o un abono de algo que estaba por pagar, sin tocar el valor ni cambiar un pago ya hecho
+      if (!cam.every((k) => CAMPOS_PAGO.includes(k))) return msgFijo(rol);
+      if (cam.includes("pagado") && !(previo.pagado === false && data.pagado === true)) return msgFijo(rol);
+      if (previo.pagado !== false && cam.some((k) => ["pagado", "fPago", "fPagoReg", "cuenta", "pagoId"].includes(k))) return msgFijo(rol);
+      if (cam.includes("abonos")) {
+        const A = previo.abonos || [], B = data.abonos || [];
+        if (B.length < A.length || A.some((x, i) => canon(x) !== canon(B[i]))) return msgFijo(rol);
+      }
+      if (cam.some((k) => k === "anticipo" || k === "fAnticipo") && +previo.anticipo) return msgFijo(rol);
+      return null;
+    case "ventas":
+      if (nuevo) return aux ? null : msgFin(rol);
+      if (!aux) return msgFin(rol);
+      if (borrar) return previo.estado === "borrador" ? null : msgFijo(rol);
+      if (previo.estado === "borrador") return data.estado === "anulada" ? msgFijo(rol) : null;   // un borrador se puede completar y contabilizar
+      return cam.length ? msgFijo(rol) : null;                                                    // lo contabilizado no se toca (anular es del contador)
+    case "compras": {
+      if (nuevo) return null;
+      if (!(await tieneEgresos(env, id))) return null;                // aún sin causar: se puede corregir (por ejemplo, lo que leyó la IA)
+      if (borrar) return "Esta factura ya está causada en Finanzas: no se puede borrar. Pide al contador que la corrija con una nota.";
+      return cam.every((k) => CAMPOS_CAUSA.includes(k)) ? null : "Esta factura ya está causada en Finanzas: no se puede cambiar su valor, fecha ni proveedor. Corrígela con una nota crédito o débito (pídela al contador).";
+    }
+    case "maquinaria":
+      if (nuevo) return aux || !data.contab ? null : msgContab;        // la gestión registra equipos; entrar a la contabilidad es del contador
+      if (borrar) return aux ? msgFijo(rol) : previo.contab ? msgContab : null;
+      if (previo.contab) return cam.some((k) => CAMPOS_ACTIVO.includes(k)) ? msgContab : null;
+      return !aux && data.contab ? msgContab : null;
+    default:
+      return null;
+  }
+}
+// configuración: precios (gestión), contable (Finanzas) y usuarios (solo admin)
+const CONT_PERMITIDO = { auxiliar: ["numAsig", "reglasProv", "causaModo", "conc"], usuario: ["numAsig", "reglasProv"], proyector: ["numAsig", "reglasProv"] };
+function permisoContable(rol, data, previo) {
+  if (rol === "contador") return null;
+  const a = previo || {}, b = data || {}, ok = CONT_PERMITIDO[rol] || [];
+  const cambiadas = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => canon(a[k] ?? null) !== canon(b[k] ?? null));
+  const malas = cambiadas.filter((k) => !ok.includes(k));
+  if (malas.some((k) => k === "cierres" || k === "cierresAnio")) return "Solo el contador cierra o reabre los meses y los años.";
+  if (malas.length) return `Tu rol (${ROL_TXT[rol]}) no cambia la configuración contable (${malas.slice(0, 3).join(", ")}). Si no tocaste nada, recarga la página: tu copia puede estar desactualizada.`;
+  if (cambiadas.includes("conc")) {
+    const A = a.conc || {}, B = b.conc || {};
+    for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) {
+      const x = A[k] || {}, y = B[k] || {};
+      if (canon(x) === canon(y)) continue;
+      if (x.cerrada || canon(x.cerrada ?? null) !== canon(y.cerrada ?? null) || canon(x.historial ?? null) !== canon(y.historial ?? null))
+        return "Solo el contador cierra o reabre una conciliación bancaria.";
+    }
+  }
+  return null;
+}
+function permisoConfig(rol, id, data, previo, borrar) {
+  if (borrar) return "Solo el administrador puede borrar la configuración.";
+  if (id === "precios") return rol === "contador" || rol === "usuario" || rol === "proyector" ? null : `Tu rol (${ROL_TXT[rol]}) no cambia los precios y costos del taller.`;
+  if (id === "contable") return permisoContable(rol, data, previo);
+  return "Solo el administrador cambia esta configuración (usuarios y nombres).";
+}
+// devuelve el mensaje de por qué NO se permite, o null si se permite. previo = documento guardado (null si es nuevo); data = null si es un borrado
+async function revisarPermiso(env, sesion, col, id, data, previo, borrar) {
+  const rol = sesion.rol;
+  if (rol === "admin") return null;
+  if (col === "config") return permisoConfig(rol, id, data, previo, borrar);
+  const nv = nivelDe(rol, col), base = nv.replace("*", "");
+  if (nv.endsWith("*")) return condicion(env, rol, col, id, previo, data, borrar);
+  if (base === "rw") return null;
+  if (base === "r" || base === "-") return msgLectura(rol, col);
+  if (base === "cu") return borrar ? msgFijo(rol) : null;
+  if (base === "c") return previo || borrar ? msgFijo(rol) : null;
+  return null;
+}
 const ID_VALIDO = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
 const MAX_BYTES = 1024 * 1024;
 
@@ -332,7 +483,7 @@ export async function onRequest({ request, env, params }) {
   const por = sesion.usuario ? sesion.usuario + " · " + sesion.nombre : nombre || null;
 
   try {
-    if (ruta === "sesion" && metodo === "GET") return json({ usuario: sesion.usuario, rol: sesion.rol, nombre: sesion.nombre });
+    if (ruta === "sesion" && metodo === "GET") return json({ usuario: sesion.usuario, rol: sesion.rol, nombre: sesion.nombre, acceso: tablaAcceso(sesion.rol) });
     if (ruta === "ping" && metodo === "POST") return await ping(request, env, sesion);
     if (ruta === "actividad" && metodo === "GET") return await actividad(request, env, sesion);
     if (ruta === "enlinea" && metodo === "GET") return await enLinea(env, sesion);
@@ -345,6 +496,7 @@ export async function onRequest({ request, env, params }) {
       const { results } = await env.DB.prepare("SELECT col, id, data FROM docs WHERE col <> 'archivos_img' AND col <> '_sistema' AND col <> 'publicas'").all();
       const out = {};
       for (const r of results) (out[r.col] ||= []).push({ id: r.id, data: JSON.parse(r.data) });
+      for (const c of Object.keys(out)) { out[c] = filtrarLectura(sesion.rol, c, out[c]); if (!out[c].length && nivelDe(sesion.rol, c) === "-") delete out[c]; }
       return json(out);
     }
 
@@ -352,7 +504,7 @@ export async function onRequest({ request, env, params }) {
 
     if (!id && metodo === "GET") {
       const { results } = await env.DB.prepare("SELECT id, data FROM docs WHERE col = ?1").bind(col).all();
-      return json(results.map((r) => ({ id: r.id, data: JSON.parse(r.data) })));
+      return json(filtrarLectura(sesion.rol, col, results.map((r) => ({ id: r.id, data: JSON.parse(r.data) }))));
     }
     if (!id || !ID_VALIDO.test(id)) return json({ error: "Identificador no válido" }, 400);
 
@@ -374,6 +526,8 @@ export async function onRequest({ request, env, params }) {
       const fila0 = col === "archivos_img" ? null : await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
       const previo = fila0 ? JSON.parse(fila0.data) : null;
       if (col !== "config") sellar(data, previo, sesion);
+      const errPerm = await revisarPermiso(env, sesion, col, id, data, previo, false);
+      if (errPerm) return json({ error: errPerm }, 403);
       const errCierre = await revisarCierreServidor(env, col, data, previo);
       if (errCierre) return json({ error: errCierre }, 403);
       const anotarPut = () => anotar(env, request, sesion, col === "archivos_img" ? "subió" : accionDe(previo), col, id, col === "archivos_img" ? "Imagen" : resumenDe(col, data));
@@ -394,6 +548,8 @@ export async function onRequest({ request, env, params }) {
       const fila = await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
       if (!fila) return json({ error: "El documento no existe" }, 400);
       const previo = JSON.parse(fila.data), data = col === "config" ? { ...previo, ...cambios } : sellar({ ...previo, ...cambios }, previo, sesion);
+      const errPerm = await revisarPermiso(env, sesion, col, id, data, previo, false);
+      if (errPerm) return json({ error: errPerm }, 403);
       const errCierre = await revisarCierreServidor(env, col, data, previo);
       if (errCierre) return json({ error: errCierre }, 403);
       await guardar(data);
@@ -404,6 +560,8 @@ export async function onRequest({ request, env, params }) {
       const fila = await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
       const previo = fila ? JSON.parse(fila.data) : null;
       if (previo) {
+        const errPerm = await revisarPermiso(env, sesion, col, id, null, previo, true);
+        if (errPerm) return json({ error: errPerm }, 403);
         const errCierre = await revisarCierreServidor(env, col, null, previo);
         if (errCierre) return json({ error: errCierre }, 403);
       }
@@ -413,7 +571,8 @@ export async function onRequest({ request, env, params }) {
     }
     if (metodo === "GET") {
       const fila = await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
-      return fila ? json({ id, data: JSON.parse(fila.data) }) : json({ error: "No existe" }, 404);
+      const visible = fila ? filtrarLectura(sesion.rol, col, [{ id, data: JSON.parse(fila.data) }])[0] : null;
+      return visible ? json(visible) : json({ error: "No existe" }, 404);
     }
     return json({ error: "Método no permitido" }, 405);
   } catch (e) {

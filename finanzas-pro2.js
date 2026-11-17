@@ -368,7 +368,7 @@ document.addEventListener("click",async e=>{const t=e.target.closest("[data-fpca
     if(d.fitNuevo){const c=cats()[0];itD={tipo:c?.tipo||"producto",cat:c?.id||"",nombre:"",cod:nuevoCod(),unidad:"94",precio:"",imp:"",barras:"",desc:"",activo:true};finModal="fpitem";render();setTimeout(()=>$("#fp-itn")?.focus(),40);return}
     if(d.fitEd){const x=store.items.find(y=>y.id===d.fitEd);if(!x)return;itD=clone(x);finModal="fpitem";render();return}
     if(d.fitGuardar){const x=itD;if(!S_(x.nombre).trim())throw {msg:"Escribe el nombre"};if(!x.cat)throw {msg:"Elige la categoría"};if(store.items.some(y=>y.id!==x.id&&S_(y.cod)===S_(x.cod)))throw {msg:"Ya hay un ítem con ese código"};
-      await guardarDoc("items",x.id||null,{...x,nombre:x.nombre.trim(),cod:S_(x.cod).trim()||nuevoCod(),precio:r0(x.precio),costo:r0(S_(x.costo).replace(/D/g,""))});itD=null;finModal=null;toast("Ítem guardado");render();return}
+      await guardarDoc("items",x.id||null,{...x,nombre:x.nombre.trim(),cod:S_(x.cod).trim()||nuevoCod(),precio:r0(x.precio),costo:r0(S_(x.costo).replace(/\D/g,""))});itD=null;finModal=null;toast("Ítem guardado");render();return}
     if(d.fitCats){catD=clone(cats());if(!catD.length)catD=CATS_BASE();finModal="fpcats";render();return}
     if(d.fitBase){CONT.itemCats=CATS_BASE();render();await guardarCont("Categorías base creadas");return}
     if(d.fcatMas){catD.push({id:"c"+uid4(),nombre:"",tipo:"producto",ctaIng:"4120",ctaInv:"",ctaCosto:""});render();return}

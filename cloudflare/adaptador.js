@@ -11,7 +11,10 @@
   async function api(ruta,opts={}){
     const r=await fetch("/api"+ruta,{...opts,headers:cab()});
     if(r.status===401){pedirAcceso(LS.get("vye-clave")?"Usuario o contraseña incorrectos.":"");const e=new Error("clave");e.code="not_granted";throw e}
-    if(!r.ok){const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":"unavailable";throw e}
+    if(!r.ok){
+      // 403 = el rol no tiene permiso: el servidor explica por qué y la pantalla lo muestra tal cual
+      let msg="";if(r.status===403){try{msg=(await r.json()).error||""}catch{}}
+      const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":r.status===403?"permission_denied":"unavailable";if(msg)e.msg=msg;throw e}
     return r.json();
   }
   function entregar(s){
@@ -124,11 +127,12 @@
   async function mostrarSesion(){
     try{sesion=await api("/sesion")}catch{return}
     LS.set("vye-nombre-cuenta",sesion.nombre||"");
-    window.VYE_SESION={usuario:sesion.usuario,rol:sesion.rol,nombre:nombre()};
+    window.VYE_SESION={usuario:sesion.usuario,rol:sesion.rol,nombre:nombre(),acceso:sesion.acceso||{}};
+    window.dispatchEvent(new Event("vye-sesion")); // la app vuelve a pintarse con lo que le corresponde a este rol
     iniciarPresencia();
     const b=document.createElement("div");b.id="vye-sesion";
     b.style.cssText="position:fixed;right:12px;bottom:12px;z-index:40;display:flex;gap:8px;align-items:center;padding:6px 8px 6px 12px;border-radius:999px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.18);font:13px system-ui,sans-serif;color:#1f2326";
-    const t=document.createElement("span");t.textContent=nombre()+" · "+({admin:"Administrador",proyector:"Proyecciones",contador:"Contador",auxiliar:"Auxiliar contable"}[sesion.rol]||"Usuario");
+    const t=document.createElement("span");t.textContent=nombre()+" · "+({admin:"Administrador",proyector:"Gerencia",contador:"Contador",auxiliar:"Auxiliar contable",usuario:"Gestión"}[sesion.rol]||"Usuario");
     const x=document.createElement("button");x.className="btn";x.textContent="Salir";x.style.cssText="padding:4px 10px";
     x.onclick=()=>{try{localStorage.removeItem("vye-clave");sessionStorage.removeItem("vye-sid")}catch{}location.reload()};
     b.append(t,x);document.body.appendChild(b);
