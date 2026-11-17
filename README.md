@@ -86,12 +86,10 @@ puede verificar y corregir cada uno.
 - Varios porcentajes de ley (ARL, exoneración de parafiscales, tarifas de
   ReteICA por ciudad) están con valores de referencia 2026 y pendientes de
   confirmar con el contador.
-- Numeración de comprobantes y operaciones con varios documentos (por ejemplo,
-  causar una factura de compra en varios gastos) no son atómicas: si la
-  conexión se cae a la mitad, puede quedar una operación a medio registrar, o
-  dos usuarios conectados al mismo tiempo podrían calcular el mismo número de
-  comprobante. Con el tamaño actual del equipo (2 a 4 personas) el riesgo es
-  bajo, pero no está resuelto a nivel de diseño.
+- La numeración de documentos contabilizados se asigna ahora en el servidor.
+  Las operaciones financieras agrupadas adaptadas usan `/api/lote`, con transacción
+  D1, bitácora e idempotencia. Ver alcance y límites en
+  [CORRECCIONES-INTEGRIDAD.md](CORRECCIONES-INTEGRIDAD.md).
 - Permisos por rol: ya están definidos y aplicados en el servidor (ver
   [ROLES.md](ROLES.md)): contador, auxiliar contable, gestión del taller y
   gerencia. Lo que queda por decidir es el detalle fino de cada caso a medida
@@ -130,3 +128,8 @@ node construir.js            # deja listo el archivo de datos iniciales vacío
 node prueba-permisos.mjs     # cada rol contra cada tipo de operación (128 casos)
 node prueba-servidor.mjs     # sesiones, bitácora, terceros, colecciones de solo agregar
 ```
+
+## Segunda revisión de integridad
+
+Correcciones y pruebas reproducibles: [CORRECCIONES-INTEGRIDAD.md](CORRECCIONES-INTEGRIDAD.md).
+Ejecuta `npm test` dentro de `cloudflare` (construye y corre las tres pruebas del servidor).

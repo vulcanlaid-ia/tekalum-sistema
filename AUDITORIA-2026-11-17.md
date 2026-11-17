@@ -1,3 +1,5 @@
+> Este documento describe la revisión anterior. Para los cambios posteriores y su alcance, consulta [CORRECCIONES-INTEGRIDAD.md](CORRECCIONES-INTEGRIDAD.md).
+
 # Auditoría externa del 17 nov 2026 — verificación y correcciones
 
 Otra IA auditó la versión [`84f549e`](https://github.com/vulcanlaid-ia/tekalum-sistema/tree/84f549ecd522a3cc092a7da674343431a12c253d)
