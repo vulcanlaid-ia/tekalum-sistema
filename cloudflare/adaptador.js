@@ -22,24 +22,29 @@
      cache = base + cola (es lo que ve la pantalla) */
   let base=null,cache=null,ver=null,confirmados=new Set(),cargando=null,fallos=0;
   let cola=[],sinInternet=false,ultimoOk=0,vaciando=false,desdeCopia=0;
-  const listo=(async()=>{try{cola=(await IDB.cola()).filter(e=>e&&e.metodo)}catch{cola=[]}pintarEstado()})();
+  const listo=Promise.race([(async()=>{try{cola=(await IDB.cola()).filter(e=>e&&e.metodo)}catch{cola=[]}pintarEstado()})(),new Promise(r=>setTimeout(r,3000))]);
   const pendientes=()=>cola.filter(e=>e.usuario===USR()&&e.estado==="pendiente");
   const fallidos=()=>cola.filter(e=>e.usuario===USR()&&e.estado==="fallido");
 
   // llamada a la API; si no hay internet, el error trae code "offline"
-  async function llamar(ruta,opts={}){
-    try{return await fetch("/api"+ruta,{...opts,headers:cab()})}
-    catch{const e=new Error("sin conexión");e.code="offline";throw e}
+  const sinRed=()=>{const e=new Error("sin conexión");e.code="offline";return e};
+  async function llamar(ruta,opts={},ms=25000){
+    const ac=new AbortController(),t=setTimeout(()=>ac.abort(),ms);
+    let r;try{r=await fetch("/api"+ruta,{...opts,headers:cab(),signal:ac.signal})}catch{clearTimeout(t);throw sinRed()}
+    r.fin=()=>clearTimeout(t);return r;
   }
-  async function api(ruta,opts={},conCab){
-    const r=await llamar(ruta,opts);
-    if(r.status===401){pedirAcceso(LS.get("vye-clave")?"Usuario o contraseña incorrectos.":"");const e=new Error("clave");e.code="not_granted";throw e}
-    if(!r.ok){
-      // 403 = el rol no tiene permiso: el servidor explica por qué y la pantalla lo muestra tal cual
-      let msg="";if(r.status===403){try{msg=(await r.json()).error||""}catch{}}
-      const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":r.status===403?"permission_denied":"unavailable";if(msg)e.msg=msg;throw e}
-    const j=await r.json();
-    return conCab?{json:j,ver:r.headers.get("x-ver")}:j;
+  async function api(ruta,opts={},conCab,ms){
+    if(ms==null)ms=ruta==="/all"?90000:25000;   // bajar todo en una conexión lenta puede tardar; lo demás es pequeño
+    const r=await llamar(ruta,opts,ms);
+    try{
+      if(r.status===401){pedirAcceso(LS.get("vye-clave")?"Usuario o contraseña incorrectos.":"");const e=new Error("clave");e.code="not_granted";throw e}
+      if(!r.ok){
+        // 403 = el rol no tiene permiso: el servidor explica por qué y la pantalla lo muestra tal cual
+        let msg="";if(r.status===403){try{msg=(await r.json()).error||""}catch{}}
+        const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":r.status===403?"permission_denied":"unavailable";if(msg)e.msg=msg;throw e}
+      let j;try{j=await r.json()}catch{throw sinRed()}   // la conexión se cortó a mitad de la descarga
+      return conCab?{json:j,ver:r.headers.get("x-ver")}:j;
+    }finally{r.fin()}
   }
   function entregar(s){
     if(!cache)return;
@@ -111,6 +116,7 @@
     cargando=(async()=>{
       try{
         await listo;
+        if(!base)await cargarCopia();         // se abre ya con la copia guardada (con internet lenta no se espera a bajar todo)
         await vaciar();                       // primero se sube lo que se registró sin internet
         const cambio=await sincronizar();
         enLinea();fallos=0;
@@ -134,7 +140,8 @@
     vaciando=true;pintarEstado();
     const correr=async()=>{
       for(const e of pendientes()){
-        let r;try{r=await llamar(e.ruta,{method:e.metodo,body:e.body===undefined?undefined:JSON.stringify(e.body)})}catch{fueraDeLinea();return}
+        let r;try{r=await llamar(e.ruta,{method:e.metodo,body:e.body===undefined?undefined:JSON.stringify(e.body)},40000)}catch{fueraDeLinea();return}
+        r.fin();
         if(r.status===401){pedirAcceso("Vuelve a entrar para subir lo que registraste sin internet.");return}
         if(r.ok||r.status===409){await quitar(e);continue}              // 409: ya estaba guardado
         if(r.status>=500||r.status===429)return;                          // el servidor no pudo ahora: se intenta luego
@@ -232,6 +239,16 @@
     if(a==="reintentar"){b.textContent="Reintentando…";await refrescar();pintarPanel()}
     if(a==="descartar"){const x=cola.find(y=>String(y.n)===b.dataset.n);if(x&&confirm("¿Descartar este registro? Se pierde: no se sube."))await quitar(x),reconstruir(),notificar(),pintarPanel(),pintarEstado()}
   });
+  // el service worker guarda la página nueva en segundo plano; aquí se avisa para que se recargue cuando la persona quiera
+  function avisarVersionNueva(){
+    if(document.getElementById("vye-nueva"))return;
+    const d=document.createElement("div");d.id="vye-nueva";
+    d.style.cssText="position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:70;display:flex;gap:10px;align-items:center;padding:8px 8px 8px 16px;border-radius:999px;background:#0c1a33;color:#fff;font:600 13px system-ui,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.3)";
+    d.innerHTML=`<span>Hay una versión nueva del sistema.</span><button style="font:inherit;padding:6px 14px;border:0;border-radius:999px;background:#fff;color:#0c1a33;cursor:pointer">Actualizar</button><button aria-label="Después" style="font:inherit;border:0;background:none;color:#fff;cursor:pointer;font-size:16px;padding:0 8px">×</button>`;
+    const [a,x]=d.querySelectorAll("button");a.onclick=()=>location.reload();x.onclick=()=>d.remove();
+    document.body.appendChild(d);
+  }
+  if("serviceWorker" in navigator)navigator.serviceWorker.addEventListener("message",e=>{if(e.data&&e.data.tipo==="nueva-version")avisarVersionNueva()});
   window.addEventListener("online",()=>refrescar());
   window.addEventListener("offline",()=>fueraDeLinea());
   window.VYE_COLA={pendientes:()=>pendientes().length,fallidos:()=>fallidos().length,sinInternet:()=>sinInternet,vaciar:()=>refrescar()};
@@ -296,16 +313,26 @@
     setTimeout(()=>d.querySelector(LS.get("vye-usuario")?"#acc-clave":"#acc-usuario").focus(),0);
   }
   // quién está dentro y botón para salir (en un computador compartido)
+  // el rol de la última vez se usa al instante (así el menú aparece sin esperar al servidor, también con internet lenta)
+  // y se confirma en segundo plano; si cambió, la pantalla se vuelve a pintar
   async function mostrarSesion(){
-    try{sesion=await api("/sesion");LS.set("vye-sesion-"+USR(),JSON.stringify(sesion))}
-    catch(e){if(e.code!=="offline")return;try{sesion=JSON.parse(LS.get("vye-sesion-"+USR())||"null")}catch{}if(!sesion)return}  // sin internet: se usa el rol de la última vez
+    let guardada=null;try{guardada=JSON.parse(LS.get("vye-sesion-"+USR())||"null")}catch{}
+    if(guardada){sesion=guardada;montarSesion();
+      try{const nueva=await api("/sesion");LS.set("vye-sesion-"+USR(),JSON.stringify(nueva));
+        if(nueva.rol!==sesion.rol||nombre()!==(nueva.nombre||nombre())||JSON.stringify(nueva.acceso)!==JSON.stringify(sesion.acceso)){sesion=nueva;LS.set("vye-nombre-cuenta",nueva.nombre||"");window.VYE_SESION={usuario:nueva.usuario,rol:nueva.rol,nombre:nombre(),acceso:nueva.acceso||{}};window.dispatchEvent(new Event("vye-sesion"));const t=document.querySelector("#vye-sesion span");if(t)t.textContent=etiquetaSesion()}}catch{}
+      return}
+    try{sesion=await api("/sesion");LS.set("vye-sesion-"+USR(),JSON.stringify(sesion))}catch{return}
+    montarSesion();
+  }
+  const etiquetaSesion=()=>nombre()+" · "+({admin:"Administrador",proyector:"Gerencia",contador:"Contador",auxiliar:"Auxiliar contable",usuario:"Gestión"}[sesion.rol]||"Usuario");
+  function montarSesion(){
     LS.set("vye-nombre-cuenta",sesion.nombre||"");
     window.VYE_SESION={usuario:sesion.usuario,rol:sesion.rol,nombre:nombre(),acceso:sesion.acceso||{}};
     window.dispatchEvent(new Event("vye-sesion")); // la app vuelve a pintarse con lo que le corresponde a este rol
     iniciarPresencia();
     const b=document.createElement("div");b.id="vye-sesion";
     b.style.cssText="position:fixed;right:12px;bottom:12px;z-index:40;display:flex;gap:8px;align-items:center;padding:6px 8px 6px 12px;border-radius:999px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.18);font:13px system-ui,sans-serif;color:#1f2326";
-    const t=document.createElement("span");t.textContent=nombre()+" · "+({admin:"Administrador",proyector:"Gerencia",contador:"Contador",auxiliar:"Auxiliar contable",usuario:"Gestión"}[sesion.rol]||"Usuario");
+    const t=document.createElement("span");t.textContent=etiquetaSesion();
     const x=document.createElement("button");x.className="btn";x.textContent="Salir";x.style.cssText="padding:4px 10px";
     x.onclick=async()=>{
       // al salir se borra la copia de los datos de este equipo; lo que esté sin subir se conserva para cuando vuelva a entrar
@@ -345,19 +372,20 @@
   // service worker para poder instalar la app con ícono en el escritorio
   if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("/sw.js").then(()=>navigator.serviceWorker.ready).then(async reg=>{
     // si por algún motivo la página aún no quedó guardada en este equipo, se le pide al service worker que la guarde
-    try{const c=await caches.open("tekalum-v3");if(!(await c.match("/shell")))reg.active?.postMessage("guardar-pagina")}catch{}
+    try{const c=await caches.open("tekalum-v4");if(!(await c.match("/shell")))reg.active?.postMessage("guardar-pagina")}catch{}
     setTimeout(avisarListo,4000);
   }).catch(()=>{}));
   // una sola vez por equipo y usuario: avisa que ya se puede trabajar sin internet (página y datos guardados)
+  let intentosListo=0;
   async function avisarListo(){
     try{
       if(LS.get("vye-listo-"+USR()))return;
-      const pag=await (await caches.open("tekalum-v3")).match("/shell"),snap=await IDB.get("snap:"+USR());
+      const pag=await (await caches.open("tekalum-v4")).match("/shell"),snap=await IDB.get("snap:"+USR());
       if(pag&&snap&&snap.base){LS.set("vye-listo-"+USR(),"1");window.toast&&window.toast("Este equipo ya quedó listo para trabajar aunque se caiga el internet.")}
-      else setTimeout(avisarListo,8000);
+      else if(++intentosListo<6)setTimeout(avisarListo,8000);
     }catch{}
   }
-  window.VYE_LISTO=async()=>{try{const pag=await (await caches.open("tekalum-v3")).match("/shell"),snap=await IDB.get("snap:"+USR());return {pagina:!!pag,datos:!!(snap&&snap.base)}}catch{return {pagina:false,datos:false}}};
+  window.VYE_LISTO=async()=>{try{const pag=await (await caches.open("tekalum-v4")).match("/shell"),snap=await IDB.get("snap:"+USR());return {pagina:!!pag,datos:!!(snap&&snap.base)}}catch{return {pagina:false,datos:false}}};
   // cada 15 s se pregunta si hay cambios; si nadie toca el sistema en 3 minutos, solo cada minuto (al volver a usarlo se actualiza al instante)
   let ultimaAccion=Date.now(),tic=0;
   const acc=()=>{const inactivo=Date.now()-ultimaAccion>180000;ultimaAccion=Date.now();if(inactivo)refrescar()};

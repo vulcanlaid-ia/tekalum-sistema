@@ -159,3 +159,13 @@ hoy (193 KB comprimidos × 240). Ahora: menos de 0,2 MB por hora sin cambios.
 
 Pruebas: `cloudflare/prueba-sinconexion.mjs` (Chrome + el manejador real de la API;
 `node construir.js` primero) y los casos de versión y cambios en `prueba-permisos.mjs`.
+
+**Internet lenta.** El sistema abre al instante con lo guardado en el equipo: la página
+(service worker, `cloudflare/app/sw.js`: se muestra la copia y se revisa en segundo plano
+con ETag; si hay una versión nueva avisa con un botón "Actualizar"), la última copia de los
+datos (se pone al día con la consulta de cambios) y el rol de la persona. Ninguna llamada
+queda esperando para siempre: si una conexión se atasca, se trata como "sin internet" y lo
+registrado queda en la cola. En el primer arranque de un equipo nuevo se ve un aviso
+"Cargando TEKALUM…" en vez de una pantalla en blanco. La prueba
+`prueba-sinconexion.mjs` simula una página de 7 s y datos de 9 s y comprueba que abre en
+menos de 4 s.

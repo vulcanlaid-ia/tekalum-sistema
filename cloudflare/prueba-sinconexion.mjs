@@ -1,12 +1,13 @@
-// Prueba de punta a punta del modo sin internet: servidor real (manejador de la API + SQLite) + Chrome.
+// Prueba de punta a punta del modo sin internet y con internet lenta: servidor real (manejador de la API + SQLite) + Chrome.
 // El "sin internet" es real: el servidor se apaga (cierra las conexiones), así que fallan también la página y el service worker.
 // Uso (desde esta carpeta):  node construir.js && node prueba-sinconexion.mjs
 // Necesita Node 22+ y Google Chrome (o la variable CHROME con la ruta del ejecutable).
 import http from "node:http";
-import fs from "node:fs";
 import os from "node:os";
-import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 
@@ -35,6 +36,7 @@ const { onRequest } = await import(pathToFileURL(path.join(RAIZ, "functions/api/
 // ---- contadores de lo que pide el navegador ----
 const golpes = {};const cuenta = (k) => (golpes[k] = (golpes[k] || 0) + 1);
 const TIPOS = { ".html": "text/html; charset=utf-8", ".js": "application/javascript", ".png": "image/png", ".ico": "image/x-icon", ".webmanifest": "application/manifest+json", ".json": "application/json" };
+const retardo = { index: 0, all: 0 };let extraHtml = "";const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
 let caido = false; // servidor realmente apagado: ni la página, ni el service worker, ni la API responden (como cuando no hay internet)
 const server = http.createServer(async (req, res) => {
   if (caido) { req.socket.destroy(); return; }
@@ -44,6 +46,7 @@ const server = http.createServer(async (req, res) => {
       const chunks = [];for await (const c of req) chunks.push(c);
       const cuerpo = chunks.length ? Buffer.concat(chunks).toString() : undefined;
       cuenta(u.pathname.replace(/^\/api\//, "").split("/").slice(0, 1)[0]);
+      if (u.pathname === "/api/all" && retardo.all) await dormir(retardo.all);
       const r = await onRequest({ request: new Request(BASE + req.url, { method: req.method, headers: req.headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : cuerpo }), env, params: { path: u.pathname.replace(/^\/api\//, "").split("/").map(decodeURIComponent) } });
       const b = Buffer.from(await r.arrayBuffer());
       res.writeHead(r.status, Object.fromEntries(r.headers));res.end(b);return;
@@ -52,7 +55,12 @@ const server = http.createServer(async (req, res) => {
     const ruta = path.join(RAIZ, "public", f);
     if (!ruta.startsWith(path.join(RAIZ, "public")) || !fs.existsSync(ruta)) { res.writeHead(404);res.end("no");return; }
     cuenta("estatico:" + (f === "index.html" ? "index" : f));
-    res.writeHead(200, { "content-type": TIPOS[path.extname(ruta)] || "application/octet-stream", "cache-control": "no-cache" });res.end(fs.readFileSync(ruta));
+    let cuerpo = fs.readFileSync(ruta);
+    if (f === "index.html" && extraHtml) { const t = cuerpo.toString(), i = t.lastIndexOf("</body>"); cuerpo = Buffer.from(t.slice(0, i) + extraHtml + t.slice(i)); }
+    const etag = "\"" + crypto.createHash("sha1").update(cuerpo).digest("hex") + "\"";
+    if (f === "index.html" && retardo.index) await dormir(retardo.index);
+    if (req.headers["if-none-match"] === etag) { res.writeHead(304, { etag, "cache-control": "no-cache" });res.end();return; }
+    res.writeHead(200, { "content-type": TIPOS[path.extname(ruta)] || "application/octet-stream", "cache-control": "no-cache", etag });res.end(cuerpo);
   } catch (e) { res.writeHead(500);res.end(String(e)); }
 });
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
@@ -176,7 +184,26 @@ chk("sin pendientes ni problemas el aviso desaparece", await ev(`!document.getEl
 const verdad = await ev(`JSON.stringify(store.egresos.map(e=>e.id).sort())`);
 chk("la pantalla de la auxiliar y el servidor quedan iguales", verdad === JSON.stringify(sq.prepare("SELECT id FROM docs WHERE col='egresos'").all().map((r) => r.id).sort()), [verdad.length]);
 
-// =============== 7. Consumo de datos ===============
+// =============== 7. Internet LENTA: abre al instante con lo guardado ===============
+retardo.index = 7000;retardo.all = 9000;
+const t0 = Date.now();
+await c("Page.navigate", { url: BASE + "/" });
+const rapido = await esperar(`typeof store!=="undefined"&&modo==="compartido"&&store.egresos.length>3&&!!window.VYE_SESION`, 25);
+const seg = (Date.now() - t0) / 1000;
+console.log("  con la página tardando 7 s y los datos 9 s, el sistema abrió en", seg.toFixed(1), "s");
+chk("con internet lenta abre en menos de 4 s usando la copia guardada (no espera a bajar nada)", rapido && seg < 4, seg);
+chk("ya muestra el menú de su rol sin esperar al servidor", (await ev(`document.body.dataset.rolfin`)) === "limitado");
+chk("el aviso blanco de \"Cargando…\" desaparece", await ev(`!document.getElementById("vye-carga")`));
+// una versión nueva publicada mientras tanto: se avisa y se actualiza con un botón
+retardo.index = 500;retardo.all = 0;extraHtml = "<script>window.__nueva=1</script>";
+await c("Page.reload");
+chk("con una versión nueva publicada aparece el aviso 'Actualizar'", await esperar(`!!document.getElementById("vye-nueva")`, 20));
+await ev(`document.querySelector("#vye-nueva button")?.click()`);
+chk("al pulsar Actualizar queda la versión nueva", await esperar(`window.__nueva===1`, 20));
+chk("y sigue abriendo normal con sus datos", await esperar(`store.egresos.length>3&&modo==="compartido"`, 20));
+extraHtml = "";retardo.index = 0;
+
+// =============== 8. Consumo de datos ===============
 const apiBytes = bytes.filter(([u]) => u.includes("/api/")).reduce((s, [, b]) => s + b, 0);
 console.log("\nTráfico /api del navegador en toda la prueba:", Math.round(apiBytes / 1024), "KB");
 console.log("Llamadas:", JSON.stringify(golpes));

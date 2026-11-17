@@ -2837,6 +2837,7 @@ function ponerBuscadores(){
   ponerBuscaSelect(m);
 }
 function render(){
+  document.getElementById("vye-carga")?.remove(); // el aviso "Cargando…" del primer arranque
   aplicarReferencias();
   document.body.dataset.rol=rolActual();document.body.dataset.rolfin=nivelFin();
   renderNav();

@@ -25,6 +25,7 @@ ${adaptador}
 </script>
 </head>
 <body>
+<div id="vye-carga" style="position:fixed;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#fff;color:#0c1a33;font:600 16px system-ui,sans-serif"><div style="width:34px;height:34px;border:4px solid #dbe3f0;border-top-color:#1d4ed8;border-radius:50%;animation:vyegira .9s linear infinite"></div><div>Cargando TEKALUM…</div></div><style>@keyframes vyegira{to{transform:rotate(360deg)}}</style>
 ${app}
 </body>
 </html>
