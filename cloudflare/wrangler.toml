@@ -1,0 +1,8 @@
+name = "vidriosyestructuras"
+pages_build_output_dir = "./public"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vidrios-db"
+database_id = "4e6f9c5d-5475-45c5-8df1-f6cc4426c958"
