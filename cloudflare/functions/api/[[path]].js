@@ -334,6 +334,7 @@ function permisoConfig(rol, id, data, previo, borrar) {
 // devuelve el mensaje de por qué NO se permite, o null si se permite. previo = documento guardado (null si es nuevo); data = null si es un borrado
 async function revisarPermiso(env, sesion, col, id, data, previo, borrar) {
   const rol = sesion.rol;
+  if (sesion.conversionCotizacion && ["cotizaciones", "ventas", "ingresos"].includes(col) && !borrar) return null;
   if (rol === "admin") return null;
   if (col === "config") return permisoConfig(rol, id, data, previo, borrar);
   const nv = nivelDe(rol, col), base = nv.replace("*", "");
@@ -593,6 +594,12 @@ async function escribirLote(request, env, sesion, operaciones, clave, intento = 
     if (SOLO_AGREGAR.includes(col) && (borrar || previo)) throw fallo("Registro inalterable: no se puede modificar ni borrar.");
     error = await revisarCierreServidor(env, col, data, previo);
     if (error) throw fallo(error);
+    if (col === "cotizaciones" && previo?.conversionVentaId) {
+      if (!data || ["subtotal", "descuento", "cliente", "items", "conversionVentaId"].some((k) => canon(previo[k]) !== canon(data[k])))
+        throw fallo("La cotización ya tiene documento de venta: corrige sus valores con el contador, sin alterar el original.");
+      if (canon(previo.f_instalada) !== canon(data.f_instalada) && (cerradoCon(CONT, diaColombia(previo.f_instalada)) || cerradoCon(CONT, diaColombia(data.f_instalada))))
+        throw fallo("La entrega afecta un período cerrado. Pide al contador que lo reabra.");
+    }
     // La configuración cambia cómo se reconstruyen todos los meses históricos.
     if (col === "config" && id === "contable" && data) {
       if (ultimoCierre(previo || {}) && ["mapa", "inicio", "ventaCuando", "provNom", "gruposAct"].some((k) => canon(data[k]) !== canon(previo?.[k])))
@@ -665,6 +672,54 @@ async function escribirLote(request, env, sesion, operaciones, clave, intento = 
   return respuesta;
 }
 
+function diaColombia(f) {
+  if (!f || !String(f).includes("T")) return String(f || "").slice(0, 10);
+  const d = new Date(f); if (Number.isNaN(+d)) return "";
+  const partes = new Intl.DateTimeFormat("en", {timeZone:"America/Bogota",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(d);
+  const v = Object.fromEntries(partes.map((p) => [p.type,p.value])); return v.year+"-"+v.month+"-"+v.day;
+}
+// Puente acotado: el taller puede preparar el documento de una obra aprobada;
+// solo Finanzas puede registrar dinero recibido. No amplía los permisos genéricos.
+async function convertirCotizacion(request, env, sesion) {
+  if (!["admin", "contador", "auxiliar", "usuario"].includes(sesion.rol)) throw fallo("Tu rol no puede convertir cotizaciones.");
+  const b = await leerCuerpo(request), id = String(b.cotId || "");
+  if (!ID_VALIDO.test(id) || !ID_VALIDO.test("cot-" + id)) throw fallo("Cotización no válida.", 400);
+  const fila = await env.DB.prepare("SELECT data FROM docs WHERE col = 'cotizaciones' AND id = ?1").bind(id).first();
+  if (!fila) throw fallo("La cotización no existe.", 404);
+  const q = JSON.parse(fila.data);
+  if (!["aprobada", "produccion", "instalada"].includes(q.estado) || q.interna) throw fallo("Primero aprueba la cotización del cliente.");
+  const existentes = await env.DB.prepare("SELECT id, data FROM docs WHERE col = 'ventas' AND json_extract(data, '$.cotId') = ?1 AND coalesce(json_extract(data, '$.estado'), '') <> 'anulada'").bind(id).all();
+  if (existentes.results.length) return { ok: true, existente: true, documentos: existentes.results.map((v) => ({col:"ventas", id:v.id, data:JSON.parse(v.data)})) };
+  // El subtotal congelado es la fuente de precio; total en cotizaciones antiguas podía incluir IVA.
+  const total = Math.round(Number(q.subtotal) * (1 - Number(q.descuento || 0) / 100));
+  if (!Number.isSafeInteger(total) || total <= 0 || typeof q.subtotal !== "number") throw fallo("Abre y guarda la cotización para confirmar su precio antes de convertirla.");
+  const CONT = await leerCont(env);
+  if (CONT.trib?.iva === "responsable") throw fallo("La cotización no discrimina IVA. El contador debe preparar esta factura desde Finanzas con sus impuestos.");
+  const fecha = String(b.fecha || ""), recibido = Number(b.recibido), porcentaje = Number(b.porcentaje);
+  if (!fechaValida(fecha) || fecha.length !== 10 || !Number.isSafeInteger(recibido) || recibido < 0 || !Number.isFinite(porcentaje) || porcentaje < 0 || porcentaje > 100)
+    throw fallo("Revisa la fecha, el abono recibido y el porcentaje inicial.", 400);
+  if (cerradoCon(CONT, fecha)) throw fallo("La fecha corresponde a un período cerrado.");
+  if (q.f_aprobada && fecha < diaColombia(q.f_aprobada)) throw fallo("La fecha no puede ser anterior a la aprobación.");
+  if (recibido && !["admin", "contador", "auxiliar"].includes(sesion.rol)) throw fallo("El contador o auxiliar debe confirmar el dinero recibido.");
+  const ingresos = await env.DB.prepare("SELECT data FROM docs WHERE col = 'ingresos' AND json_extract(data, '$.cotId') = ?1").bind(id).all();
+  const abonado = ingresos.results.map((r) => JSON.parse(r.data)).filter((i) => i.cobrado !== false && ["anticipo", "saldo", "contado", "servicio"].includes(i.tipo)).reduce((s,i) => s + (+i.valor || 0) + (+i.rete || 0) + (+i.reteica || 0), 0);
+  if (recibido + abonado > total) throw fallo("El abono supera el saldo del trabajo. Los pagos anteriores ya están incluidos.");
+  const pactado = Math.round(total * porcentaje / 100), incompleto = abonado + recibido < pactado;
+  if (incompleto && b.autorizaInicio !== true) throw fallo("Confirma que se permite iniciar con el anticipo incompleto o sin abono.");
+  let cuenta = null;
+  if (recibido) {
+    const c = await env.DB.prepare("SELECT data FROM docs WHERE col = 'cuentas' AND id = ?1").bind(String(b.cuenta || "")).first();
+    cuenta = c && JSON.parse(c.data);
+    if (!cuenta || cuenta.activa === false) throw fallo("Elige una caja o banco activo para el dinero recibido.");
+  }
+  const ventaId = "cot-" + id, ingresoId = "abono-" + id;
+  const condiciones = { porcentajeInicial:porcentaje, anticipoPactado:pactado, abonadoAlConvertir:abonado+recibido, inicioSinCompletar:incompleto, autorizadoPor:sesion.usuario, f:fecha };
+  const venta = { estado:"contabilizada", tipoDoc:"CB", f:fecha, venc:b.entrega && fechaValida(b.entrega) && b.entrega >= fecha ? b.entrega : "", cliente:q.cliente?.nombre || "", cotId:id, cc:q.cc || "PROD", forma:"k:30", origen:"cotizacion-aprobada", reconocimiento:"entrega", conIva:false, lineas:[{cta:"4120",desc:"Fabricación e instalación según cotización " + (q.numero || id),cant:1,pu:total,dcto:0,ivaT:0}],ret:[],fe:{estado:"no"},condicionesPago:condiciones,creado:new Date().toISOString(),notas:"Documento interno. No transmitido a DIAN. El cobro y el saldo se registran por separado." };
+  const ops = [{col:"cotizaciones",id,data:{...q,conversionVentaId:ventaId,condicionesPago:condiciones},previo:q},{col:"ventas",id:ventaId,data:venta,previo:null}];
+  if (recibido) ops.push({col:"ingresos",id:ingresoId,previo:null,data:{f:fecha,tipo:"saldo",cuenta:b.cuenta,valor:recibido,cotId:id,ventaId,ventaRef:"cot:"+id,cliente:venta.cliente,concepto:"Abono inicial · "+q.numero,cobrado:true,causado:false,rete:0,reteica:0,origen:"cotizacion-aprobada"}});
+  return escribirLote(request, env, {...sesion,conversionCotizacion:true}, ops, String(b.clave || ""));
+}
+
 export async function onRequest({ request, env, params }) {
   if (!env.DB) return json({ error: "Falta conectar la base de datos D1 con el nombre DB (revisa wrangler.toml)" }, 500);
 
@@ -687,6 +742,7 @@ export async function onRequest({ request, env, params }) {
     if (ruta === "actividad" && metodo === "GET") return await actividad(request, env, sesion);
     if (ruta === "enlinea" && metodo === "GET") return await enLinea(env, sesion);
 
+    if (ruta === "convertir-cotizacion" && metodo === "POST") return json(await convertirCotizacion(request, env, sesion));
     if (ruta === "lote" && metodo === "POST") {
       const b = await leerCuerpo(request);
       return json(await escribirLote(request, env, sesion, b.operaciones, b.clave));

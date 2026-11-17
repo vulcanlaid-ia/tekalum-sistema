@@ -103,7 +103,7 @@ const refVenta=v=>v.cotId?"cot:"+v.cotId:"ventas:"+v.id;
 const ctaRetV=im=>im.tipo==="riva"?mapa("reteiva"):im.tipo==="rica"?mapa("reteica"):mapa("rete");
 function lineasVenta(v){const t=calcVenta(v),L=[{cta:mapa("cxc"),d:t.neto,det:"Cuenta por cobrar"}];
   for(const r of t.rets)L.push({cta:ctaRetV(r.im),d:r.v,det:r.im.nombre});
-  for(const l of t.L)if(l.base)L.push({cta:l.cta||mapa("venta"),c:l.base,cc:l.cc||v.cc||"PROD",det:l.desc||""});
+  for(const l of t.L)if(l.base)L.push({cta:v.reconocimiento==="entrega"?"270505":l.cta||mapa("venta"),c:l.base,cc:l.cc||v.cc||"PROD",det:l.desc||""});
   for(const x of Object.values(t.ivaPor))L.push({cta:x.im.ctaV||mapa("ivaGen"),c:x.v,det:x.im.nombre});
   return L}
 const nomDocV=v=>v.tipoDoc==="FV"?"Factura de venta":"Cuenta de cobro";
@@ -114,9 +114,9 @@ const esNotaVenta=n=>n.tipo==="NCV"||n.tipo==="NDV";
 const egGrupo0=id=>{for(const g of agruparTx(store.egresos))if(g.some(y=>y.id===id))return g[0];return null};
 const cxpDeEg=e=>catEg(e.cat)[3]==="materiales"?mapa("cxpMat"):mapa("cxpOtros");
 function lineasNota(n){const t=calcNota(n);
-  if(esNotaVenta(n)){const v=store.ventas.find(x=>x.id===n.ref);const cta1=v?.lineas?.[0]?.cta||mapa("venta");
-    if(n.tipo==="NCV")return [...t.L.map(l=>({cta:mapa("devVentas"),d:l.base,det:l.desc||"Devolución o rebaja",cc:v?.cc||"PROD"})),{cta:mapa("ivaGen"),d:t.iva,det:"IVA de la nota"},{cta:mapa("cxc"),c:t.total,det:"Menos cuenta por cobrar"}];
-    return [{cta:mapa("cxc"),d:t.total,det:"Más cuenta por cobrar"},...t.L.map(l=>({cta:cta1,c:l.base,det:l.desc||"Ajuste",cc:v?.cc||"PROD"})),{cta:mapa("ivaGen"),c:t.iva,det:"IVA de la nota"}]}
+  if(esNotaVenta(n)){const v=store.ventas.find(x=>x.id===n.ref);const cta1=v?.lineas?.[0]?.cta||mapa("venta"),diferida=v?.reconocimiento==="entrega"&&(!window.COTFIN?.fechaEntrega(v)||n.f<=window.COTFIN.fechaEntrega(v));
+    if(n.tipo==="NCV")return [...t.L.map(l=>({cta:diferida?"270505":mapa("devVentas"),d:l.base,det:l.desc||"Devolución o rebaja",cc:v?.cc||"PROD"})),{cta:mapa("ivaGen"),d:t.iva,det:"IVA de la nota"},{cta:mapa("cxc"),c:t.total,det:"Menos cuenta por cobrar"}];
+    return [{cta:mapa("cxc"),d:t.total,det:"Más cuenta por cobrar"},...t.L.map(l=>({cta:diferida?"270505":cta1,c:l.base,det:l.desc||"Ajuste",cc:v?.cc||"PROD"})),{cta:mapa("ivaGen"),c:t.iva,det:"IVA de la nota"}]}
   const e=store.egresos.find(x=>x.id===n.ref);if(!e)return [];const gasto=mapa("eg."+e.cat),cxp=cxpDeEg(e);
   if(n.tipo==="NCC")return [{cta:cxp,d:t.total,det:"Menos cuenta por pagar"},...t.L.map(l=>({cta:gasto,c:l.base,det:l.desc||"Devolución o descuento"})),{cta:mapa("ivaDesc"),c:t.iva,det:"IVA descontable"}];
   return [...t.L.map(l=>({cta:gasto,d:l.base,det:l.desc||"Mayor valor"})),{cta:mapa("ivaDesc"),d:t.iva,det:"IVA descontable"},{cta:cxp,c:t.total,det:"Más cuenta por pagar"}]}
@@ -132,7 +132,7 @@ CARTERA_REF.ventas=x=>{const v=store.ventas.find(y=>y.id===x.k.slice(7));x.venc=
 // pagos y saldo de una venta
 const abonosDe=v=>store.ingresos.filter(i=>v.cotId?i.cotId===v.cotId&&ING_VENTA.includes(i.tipo):i.ventaId===v.id);
 const notasDe=v=>store.notasdoc.filter(n=>n.ref===v.id&&n.estado==="contabilizada");
-const pagadoDe=L=>L.reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0),debeV=x=>calcVenta(x).neto+notasDe(x).reduce((s,n)=>s+(n.tipo==="NCV"?-1:1)*calcNota(n).total,0);
+const pagadoDe=L=>L.filter(i=>i.cobrado!==false).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0),debeV=x=>calcVenta(x).neto+notasDe(x).reduce((s,n)=>s+(n.tipo==="NCV"?-1:1)*calcNota(n).total,0);
 // varias cuentas de cobro de una misma obra: lo pagado se aplica en orden (la más antigua primero)
 function saldoVenta(v){if(v.estado!=="contabilizada")return 0;if(!v.cotId)return debeV(v)-pagadoDe(abonosDe(v));
   const V=store.ventas.filter(x=>x.cotId===v.cotId&&x.estado==="contabilizada").sort((a,b)=>S_(a.f).localeCompare(S_(b.f))||S_(a.num).localeCompare(S_(b.num)));let pool=pagadoDe(abonosDe(v));
@@ -211,7 +211,7 @@ function vVentas(){
   const mesAct=hoy().slice(0,7),delMes=cont.filter(v=>S_(v.f).startsWith(mesAct)).reduce((s,v)=>s+calcVenta(v).total,0);
   return `${cab("Ventas","Facturas de venta",feOn()?"Facturas electrónicas de venta: se numeran con la resolución de la DIAN y se envían al proveedor tecnológico.":"Mientras no haya facturación electrónica, cada venta sale como <b>cuenta de cobro</b> numerada y queda en la contabilidad. Cuando actives la facturación electrónica, el mismo botón emite la factura.",`<button class="btn" data-frcm="1">Recibo de caja</button><button class="btn primary" data-fp="venta-nueva">+ Nueva ${feOn()?"factura":"venta"}</button>`)}
   ${feOn()?"":`<div class="fp-alerta info">Facturación electrónica <b>apagada</b>. ${esResp()?"":"TEKALUM es no responsable de IVA: las ventas no llevan IVA. "}Se enciende en <button class="btn small ghost" data-fin="dian">Configuración › Facturación electrónica</button></div>`}
-  <div class="kpis">${kpi("Vendido este mes",cop(delMes),mesNom(mesAct))}${kpi("Por cobrar",cop(porC),`${cont.filter(v=>saldoVenta(v)>0).length} documento(s)`)}${kpi("Vencidas",String(venc.length),venc.length?cop(venc.reduce((s,v)=>s+saldoVenta(v),0)):"al día",venc.length?"color:var(--bad)":"")}${kpi("Documentos",String(T.length),T.filter(v=>v.estado==="borrador").length+" en borrador")}</div>
+  <div class="kpis">${kpi("Facturado este mes",cop(delMes),"No equivale a dinero recibido")}${kpi("Cobrado este mes",cop(store.ingresos.filter(i=>String(i.f).startsWith(mesAct)&&i.cobrado!==false&&(i.ventaId||i.cotId&&cotFacturada(i.cotId))).reduce((s,i)=>s+(+i.valor||0),0)),"Dinero recibido en caja o bancos")}${kpi("Por cobrar",cop(porC),`${cont.filter(v=>saldoVenta(v)>0).length} documento(s)`)}${kpi("Vencidas",String(venc.length),venc.length?cop(venc.reduce((s,v)=>s+saldoVenta(v),0)):"al día",venc.length?"color:var(--bad)":"")}${kpi("Documentos",String(T.length),T.filter(v=>v.estado==="borrador").length+" en borrador")}</div>
   <div class="fp-filtros" style="margin-top:12px"><label style="flex:1;min-width:200px">Buscar<input id="fp-vq" data-fpf="v:q" value="${esc(vF.q)}" placeholder="Número, cliente o descripción"></label>${filtroFechas(vF,"v",T)}
     <label>Estado<select data-fpf="v:estado"><option value="">Todos</option>${Object.entries(EST_V).map(([k,x])=>`<option value="${k}" ${vF.estado===k?"selected":""}>${x[2]}</option>`).join("")}</select></label></div>
   ${porMes(L,"f",[["Fecha"],["Número"],["Cliente"],["Vence","fp-oc"],["Total","r"],["Saldo","r"],["Estado"]],v=>{const e=estadoVenta(v),t=calcVenta(v),x=EST_V[e];

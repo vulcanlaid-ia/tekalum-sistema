@@ -113,7 +113,7 @@
       async get(){await refrescar();let snap;const s={tipo:"col",col,orden,cb:x=>snap=x};entregar(s);return snap},
       onSnapshot(cb,err){return sub({tipo:"col",col,orden,cb,err})}};
   }
-  const db={atomic,get enTransaccion(){return !!transaccion},doc(p){const a=p.split("/");return docRef(a.slice(0,-1).join("/"),a[a.length-1])},collection:p=>colRef(p)};
+  const db={async convertirCotizacion(datos){const r=await api("/convertir-cotizacion",{method:"POST",body:JSON.stringify(datos)});for(const d of r.documentos||[])local(d.col,d.id,d.data);return r},atomic,get enTransaccion(){return !!transaccion},doc(p){const a=p.split("/");return docRef(a.slice(0,-1).join("/"),a[a.length-1])},collection:p=>colRef(p)};
 
   // Usuario: el nombre sale de la cuenta con la que se entra (el administrador lo cambia en Usuarios y actividad)
   const nombre=()=>sesion?.nombre||LS.get("vye-nombre-cuenta")||LS.get("vye-usuario")||"";

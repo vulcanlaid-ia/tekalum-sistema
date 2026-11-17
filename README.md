@@ -133,3 +133,9 @@ node prueba-servidor.mjs     # sesiones, bitácora, terceros, colecciones de sol
 
 Correcciones y pruebas reproducibles: [CORRECCIONES-INTEGRIDAD.md](CORRECCIONES-INTEGRIDAD.md).
 Ejecuta `npm test` dentro de `cloudflare` (construye y corre las tres pruebas del servidor).
+
+## Cotizaciones aprobadas y abonos
+
+El flujo de conversión, los permisos y la separación de facturado/cobrado/pendiente
+se describen en [FLUJO-COTIZACION-FINANZAS.md](FLUJO-COTIZACION-FINANZAS.md).
+Se agregan 20 pruebas de conversión al comando `npm test`.

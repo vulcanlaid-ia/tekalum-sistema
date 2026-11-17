@@ -2539,6 +2539,7 @@ async function cambiarEstado(id,estado){
     else{q.estado=estado;q["f_"+estado]=ahora;render()}
     toast(`${q.numero} → ${ESTADO_NOMBRE[estado]}`);
     if(estado==="aprobada"&&!otDeCot(id))await crearOT(q);
+    if(estado==="aprobada"&&window.COTFIN)COTFIN.abrir(id);
   }catch(e){toast("No se pudo actualizar: "+(e.code||"error"))}
 }
 async function eliminar(id){
@@ -5251,8 +5252,8 @@ const cuentasActivas=()=>store.cuentas.filter(c=>c.activa!==false).sort((a,b)=>(
 const opcCuentas=sel=>`<option value="">Sin cuenta</option>`+cuentasActivas().map(c=>`<option value="${esc(c.id)}" ${sel===c.id?"selected":""}>${esc(nombreCuenta(c.id))}</option>`).join("");
 // obras vendidas: cotizaciones aprobadas, en producción o instaladas (sin las obras propias)
 const obrasVendidas=()=>quotes.filter(q=>GANADAS.includes(q.estado)&&!q.interna).sort((a,b)=>String(b.f_aprobada||b.actualizada||b.creada).localeCompare(String(a.f_aprobada||a.actualizada||a.creada)));
-const cobradoDe=id=>store.ingresos.filter(i=>i.cotId===id&&ING_VENTA.includes(i.tipo)).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
-function carteraDe(q){const total=Math.round(totalDe(q)),cob=cobradoDe(q.id),saldo=Math.max(0,total-cob),ant=Math.round(total*.6);
+const cobradoDe=id=>store.ingresos.filter(i=>i.cotId===id&&i.cobrado!==false&&ING_VENTA.includes(i.tipo)).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
+function carteraDe(q){const total=Math.round(totalDe(q)),cob=cobradoDe(q.id),saldo=Math.max(0,total-cob),ant=Math.round(total*(q.condicionesPago?.porcentajeInicial??60)/100);
   return {q,total,cob,saldo,ant,estado:saldo<=0?"pagada":cob+1<ant?"anticipo":"saldo"}}
 // saldo de una cuenta: saldo inicial + ingresos + aportes en dinero − egresos pagados ± traslados
 function saldoCuenta(id){
@@ -5302,7 +5303,7 @@ function vIngresos(){
         <label class="f full">Concepto<input id="ing-concepto" data-fik="concepto" value="${esc(D.concepto)}" placeholder="Ej. Anticipo 60 % puerta principal"></label>
         <label class="f full">Nota<input id="ing-nota" data-fik="nota" value="${esc(D.nota)}" placeholder="Opcional: número de transferencia, recibo…"></label>
       </div>
-      ${cot?`<div class="who" style="margin-top:8px">Cotización ${esc(cot.q.numero)}: total ${cop(cot.total)} · cobrado ${cop(cot.cob)} · saldo <b>${cop(cot.saldo)}</b>${cot.cob<cot.ant?` · anticipo del 60 %: ${cop(cot.ant-cot.cob)}`:""}
+      ${cot?`<div class="who" style="margin-top:8px">Cotización ${esc(cot.q.numero)}: total ${cop(cot.total)} · cobrado ${cop(cot.cob)} · saldo <b>${cop(cot.saldo)}</b>${cot.cob<cot.ant?` · anticipo acordado: ${cop(cot.ant-cot.cob)}`:""}
         <span class="row" style="gap:6px;margin-top:6px">${cot.cob<cot.ant?`<button class="btn small" data-fi="poner" data-v="${cot.ant-cot.cob}">Poner anticipo ${cop(cot.ant-cot.cob)}</button>`:""}${cot.saldo>0?`<button class="btn small" data-fi="poner" data-v="${cot.saldo}">Poner saldo ${cop(cot.saldo)}</button>`:""}</span></div>`:""}
       ${causa?`<div class="notice" style="margin-top:10px">Se registra el ingreso hoy (causación) y queda como <b>cuenta por cobrar</b> a nombre de quien debe. Cuando entre el dinero, pulsa <b>Cobrar</b> en la lista de "Por cobrar".</div>`:""}
       ${!causa&&(!D.editId||D.tx)?`<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">${(D.extra||[]).length?`<div class="who" style="margin-bottom:6px">Otros ingresos de esta misma transacción (misma fecha y misma cuenta; quedan en un solo recibo de caja):</div>`:""}
@@ -5368,7 +5369,7 @@ function vCartera(){
   return `<div class="head"><div><div class="eyebrow">Ventas</div><h1>Cartera</h1><p>Lo que deben los clientes de cada obra vendida. El anticipo de referencia es el 60 % al empezar y el 40 % al entregar. Los pagos se registran en Ingresos.</p></div></div>
   <div class="kpis">
     ${kpi("Por cobrar",cop(sum(R,r=>r.saldo)),`${R.filter(r=>r.saldo>0).length} obra${R.filter(r=>r.saldo>0).length===1?"":"s"}`)}
-    ${kpi("Anticipos pendientes",cop(sum(R.filter(r=>r.estado==="anticipo"),r=>r.ant-r.cob)),`${R.filter(r=>r.estado==="anticipo").length} sin el 60 % completo`)}
+    ${kpi("Anticipos pendientes",cop(sum(R.filter(r=>r.estado==="anticipo"),r=>r.ant-r.cob)),`${R.filter(r=>r.estado==="anticipo").length} sin el anticipo completo`)}
     ${kpi("Cobrado",cop(sum(R,r=>r.cob)),"de las obras vendidas")}
     ${kpi("Vendido",cop(sum(R,r=>r.total)),`${R.length} obra${R.length===1?"":"s"} aprobada${R.length===1?"":"s"}`)}
   </div>
@@ -5715,7 +5716,7 @@ function asientosTodos(conCierre){
   // ventas: la obra se vuelve cuenta por cobrar del cliente; lo recibido antes (anticipos) se cruza ese día
   const ventas={};for(const q of quotes){const vd=cotFacturada(q.id),f=vd?String(vd.f).slice(0,10):fechaVenta(q);if(!f)continue;ventas[q.id]=f;
     if(!vd)add("FV",f,"Venta · "+q.numero,q.cliente?.nombre,[{cta:mapa("cxc"),d:totalDe(q)},{cta:mapa("venta"),c:totalDe(q),cc:q.cc||"PROD"}],{col:"cotizaciones",id:q.id},{cot:q.id});
-    const antes=store.ingresos.filter(i=>i.cotId===q.id&&ING_VENTA.includes(i.tipo)&&String(i.f)<f).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
+    const antes=store.ingresos.filter(i=>i.cotId===q.id&&i.cobrado!==false&&ING_VENTA.includes(i.tipo)&&String(i.f)<f).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
     const tope=vd?store.ventas.filter(x=>x.cotId===q.id&&x.estado==="contabilizada").reduce((s,x)=>s+(window.FPRO?FPRO.calcVenta(x).neto:0),0):totalDe(q),cruza=Math.min(antes,Math.max(0,tope));
     if(cruza)add("AA",f,"Cruce de anticipos con la venta · "+q.numero,q.cliente?.nombre,[{cta:mapa("ing.anticipo"),d:cruza},{cta:mapa("cxc"),c:cruza}],{col:"cruce",id:q.id},{cot:q.id})}
   const ingTx={};for(const i of store.ingresos)if(i.tx&&!i.causado&&i.cobrado!==false)(ingTx[i.tx] ||= []).push(i);
@@ -8039,7 +8040,7 @@ document.addEventListener("click",async e=>{
       if(!draft.cliente.nombre.trim()){toast("Escribe el nombre del cliente");$("#c-nombre")?.focus();return}
       {const sp=sinPrecio(draft.items);if(sp.length&&!draft.avisoPrecio){draft.avisoPrecio=true;toast(`Ojo: ${sp.length} material${sp.length>1?"es":""} sin precio cuenta${sp.length>1?"n":""} en $0 (${sp.slice(0,3).join(", ")}). Pulsa Guardar otra vez para guardar así.`);return}delete draft.avisoPrecio}
       b.disabled=true;
-      try{const id=await guardarCotizacion(clone(draft));toast(`Cotización ${draft.numero} guardada`);draft=nuevoDraft();cur=nuevoItem();editIdx=-1;guardarDraftLocal();detalleId=id;detalleTab="doc";vista="detalle";render()}
+      try{const id=await guardarCotizacion(clone(draft));toast(`Cotización ${draft.numero} guardada`);draft=nuevoDraft();cur=nuevoItem();editIdx=-1;guardarDraftLocal();detalleId=id;detalleTab="doc";vista="detalle";render();if(quotes.find(q=>q.id===id)?.estado==="aprobada"&&window.COTFIN)setTimeout(()=>COTFIN.abrir(id),0)}
       catch(err){b.disabled=false;toast(err.code==="invalid_argument"?"No tienes permiso para guardar. Pide acceso de colaborador.":"No se pudo guardar ("+(err.code||"error")+")")}
       break}
     case "editar":{const q=quotes.find(x=>x.id===detalleId);if(q){draft=clone(q);draft.cliente ||= {nombre:"",telefono:"",direccion:""};cur=draft.items[0]?clone(draft.items[0]):nuevoItem();cur=nuevoItem(cur.producto);editIdx=-1;
@@ -8126,3 +8127,4 @@ iniciar();
 <script src="finanzas-pro.js"></script>
 <script src="finanzas-pro2.js"></script>
 <script src="finanzas-pro3.js"></script>
+<script src="finanzas-pro4.js"></script>
