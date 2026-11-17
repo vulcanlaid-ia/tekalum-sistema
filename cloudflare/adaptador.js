@@ -343,7 +343,21 @@
   window.VYE_API=async ruta=>api(ruta);
 
   // service worker para poder instalar la app con ícono en el escritorio
-  if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("/sw.js").catch(()=>{}));
+  if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("/sw.js").then(()=>navigator.serviceWorker.ready).then(async reg=>{
+    // si por algún motivo la página aún no quedó guardada en este equipo, se le pide al service worker que la guarde
+    try{const c=await caches.open("tekalum-v3");if(!(await c.match("/shell")))reg.active?.postMessage("guardar-pagina")}catch{}
+    setTimeout(avisarListo,4000);
+  }).catch(()=>{}));
+  // una sola vez por equipo y usuario: avisa que ya se puede trabajar sin internet (página y datos guardados)
+  async function avisarListo(){
+    try{
+      if(LS.get("vye-listo-"+USR()))return;
+      const pag=await (await caches.open("tekalum-v3")).match("/shell"),snap=await IDB.get("snap:"+USR());
+      if(pag&&snap&&snap.base){LS.set("vye-listo-"+USR(),"1");window.toast&&window.toast("Este equipo ya quedó listo para trabajar aunque se caiga el internet.")}
+      else setTimeout(avisarListo,8000);
+    }catch{}
+  }
+  window.VYE_LISTO=async()=>{try{const pag=await (await caches.open("tekalum-v3")).match("/shell"),snap=await IDB.get("snap:"+USR());return {pagina:!!pag,datos:!!(snap&&snap.base)}}catch{return {pagina:false,datos:false}}};
   // cada 15 s se pregunta si hay cambios; si nadie toca el sistema en 3 minutos, solo cada minuto (al volver a usarlo se actualiza al instante)
   let ultimaAccion=Date.now(),tic=0;
   const acc=()=>{const inactivo=Date.now()-ultimaAccion>180000;ultimaAccion=Date.now();if(inactivo)refrescar()};

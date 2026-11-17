@@ -1,4 +1,5 @@
 // Prueba de punta a punta del modo sin internet: servidor real (manejador de la API + SQLite) + Chrome.
+// El "sin internet" es real: el servidor se apaga (cierra las conexiones), así que fallan también la página y el service worker.
 // Uso (desde esta carpeta):  node construir.js && node prueba-sinconexion.mjs
 // Necesita Node 22+ y Google Chrome (o la variable CHROME con la ruta del ejecutable).
 import http from "node:http";
@@ -34,7 +35,9 @@ const { onRequest } = await import(pathToFileURL(path.join(RAIZ, "functions/api/
 // ---- contadores de lo que pide el navegador ----
 const golpes = {};const cuenta = (k) => (golpes[k] = (golpes[k] || 0) + 1);
 const TIPOS = { ".html": "text/html; charset=utf-8", ".js": "application/javascript", ".png": "image/png", ".ico": "image/x-icon", ".webmanifest": "application/manifest+json", ".json": "application/json" };
+let caido = false; // servidor realmente apagado: ni la página, ni el service worker, ni la API responden (como cuando no hay internet)
 const server = http.createServer(async (req, res) => {
+  if (caido) { req.socket.destroy(); return; }
   try {
     const u = new URL(req.url, BASE);
     if (u.pathname.startsWith("/api/")) {
@@ -53,7 +56,8 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { res.writeHead(500);res.end(String(e)); }
 });
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
-const llamarAPI = async (u, c, metodo, ruta, body) => { const r = await fetch(BASE + "/api" + ruta, { method: metodo, headers: { "x-usuario": u, "x-clave": c, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }); return { s: r.status, b: await r.json() }; };
+// otra persona que sí tiene internet: llama al manejador directo (no pasa por el servidor "caído")
+const llamarAPI = async (u, c, metodo, ruta, body) => { const p = ruta.split("?")[0].split("/").filter(Boolean); const r = await onRequest({ request: new Request(BASE + "/api" + ruta, { method: metodo, headers: { "x-usuario": u, "x-clave": c, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }), env, params: { path: p } }); return { s: r.status, b: await r.json() }; };
 const enServidor = (col, id) => { const f = sq.prepare("SELECT data FROM docs WHERE col=? AND id=?").get(col, id); return f ? JSON.parse(f.data) : null; };
 
 // ---- Chrome ----
@@ -73,7 +77,7 @@ const ev = async (x) => { const r = await c("Runtime.evaluate", { expression: x,
 await c("Runtime.enable");await c("Network.enable");await c("Page.enable");
 await c("Emulation.setDeviceMetricsOverride", { width: 1360, height: 900, deviceScaleFactor: 1, mobile: false });
 await c("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem("vye-usuario","car");localStorage.setItem("vye-clave","c")}catch{}` });
-const offline = (v) => c("Network.emulateNetworkConditions", { offline: v, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+const offline = async (v) => { caido = v; await c("Network.emulateNetworkConditions", { offline: v, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); };
 const esperar = async (cond, seg = 30) => { for (let i = 0; i < seg * 4; i++) { if (await ev(cond)) return true; await w(250); } return false; };
 const ok = [], mal = [];const chk = (n, cond, info) => (cond ? ok : mal).push(n + (info !== undefined ? " → " + JSON.stringify(info) : ""));
 const LISTA = `typeof store!=="undefined"&&typeof modo!=="undefined"&&modo==="compartido"&&store.cuentas.length>0&&!!window.VYE_SESION&&!!window.VYE_COLA`;
@@ -84,6 +88,8 @@ await c("Page.navigate", { url: BASE + "/" });
 chk("la app abre y trae los datos", await esperar(LISTA, 60));
 chk("la auxiliar entra con su rol", (await ev(`window.VYE_SESION?.rol`)) === "auxiliar");
 await w(2500); // que el service worker termine de guardar la página
+const listo0 = await ev(`window.VYE_LISTO()`);
+chk("desde la primera visita la página queda guardada en el equipo", listo0.pagina, listo0);
 for (const k of Object.keys(golpes)) delete golpes[k];bytes.length = 0;
 await w(36000);
 console.log("  en 36 s sin cambios, el navegador pidió:", JSON.stringify(golpes));

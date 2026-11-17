@@ -2,8 +2,11 @@
 // - La página se pide siempre primero a internet (así se ve la versión nueva apenas se publica); la última copia
 //   queda guardada en este equipo y se usa solo si no hay conexión.
 // - Los datos NO pasan por aquí: los guarda y los sube el adaptador (IndexedDB), y los pedidos a /api nunca se cachean.
-const V = "tekalum-v2";
-self.addEventListener("install", () => self.skipWaiting());
+const V = "tekalum-v3";
+// la página queda guardada desde la PRIMERA visita (al instalarse), no solo después de volver a abrirla
+const guardarPagina = async () => { const r = await fetch("/", { cache: "reload" }); if (r.ok) await (await caches.open(V)).put("/shell", r); };
+self.addEventListener("install", (e) => e.waitUntil(guardarPagina().catch(() => {}).then(() => self.skipWaiting())));
+self.addEventListener("message", (e) => { if (e.data === "guardar-pagina") e.waitUntil(guardarPagina().catch(() => {})); });
 self.addEventListener("activate", (e) => e.waitUntil((async () => {
   for (const k of await caches.keys()) if (k !== V) await caches.delete(k);
   await self.clients.claim();
