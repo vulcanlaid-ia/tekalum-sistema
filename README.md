@@ -130,3 +130,32 @@ node construir.js            # deja listo el archivo de datos iniciales vacío
 node prueba-permisos.mjs     # cada rol contra cada tipo de operación (128 casos)
 node prueba-servidor.mjs     # sesiones, bitácora, terceros, colecciones de solo agregar
 ```
+
+## Modo sin internet y consumo de datos
+
+**Sincronización liviana.** La pantalla ya no descarga todos los datos cada 15
+segundos. Pregunta `GET /api/version` (unos 250 bytes: cuántos documentos hay y la
+fecha del último cambio) y solo si cambió pide `GET /api/cambios?desde=…`, que trae
+únicamente los documentos tocados. Si alguien borró algo (la cuenta no cuadra) baja
+todo una vez. Si nadie toca el sistema en 3 minutos, pregunta cada minuto en vez de
+cada 15 segundos. Antes: unos 45 MB por hora por pestaña abierta con los datos de
+hoy (193 KB comprimidos × 240). Ahora: menos de 0,2 MB por hora sin cambios.
+
+**Sin internet.** Todo vive en `cloudflare/adaptador.js` y `cloudflare/app/sw.js`:
+
+- El *service worker* guarda la última copia de la página para poder abrirla sin
+  conexión (siempre pide primero a internet, para que se vea la versión nueva).
+- La última copia de los datos queda en el equipo (IndexedDB, por usuario) y se
+  borra al pulsar "Salir".
+- Lo que se registra sin internet entra en una cola (IndexedDB), se ve en pantalla
+  al instante y se sube en el mismo orden cuando vuelve la conexión. Un cambio sobre
+  un registro que aún no ha subido se funde con él (no es "editar lo ya guardado").
+- Al subir, el servidor aplica sus reglas de siempre (permisos del rol, meses
+  cerrados). Lo que rechaza **no se pierde**: queda en un panel con el motivo para
+  decidir. Un reenvío idéntico de algo ya guardado no cuenta como edición.
+- Los cambios de configuración (cierres, mapa de cuentas, precios) y los enlaces
+  para clientes necesitan internet.
+- Los números de comprobante definitivos se asignan al sincronizar.
+
+Pruebas: `cloudflare/prueba-sinconexion.mjs` (Chrome + el manejador real de la API;
+`node construir.js` primero) y los casos de versión y cambios en `prueba-permisos.mjs`.

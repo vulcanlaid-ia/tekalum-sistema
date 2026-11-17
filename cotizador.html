@@ -6466,6 +6466,8 @@ function hojasContabilidad(){
   return [{nombre:"Libro diario",filas:diario,anchos:[11,12,24,40,26,10,40,15,15],filtroHasta:diario.length},{nombre:"Balance de prueba",filas:prueba,anchos:[10,44,16,16,16,16]},{nombre:"Estado de resultados",filas:er,anchos:[10,44,18,18]},{nombre:"Balance general",filas:bg,anchos:[10,44,18]},{nombre:"Terceros",filas:ter,anchos:[34,10,16,5,24,16,26,30,16]},{nombre:"Inventario (kárdex)",filas:[["Material","Unidad","Cantidad","Costo promedio","Valor"],...kardexTodos().map(k=>[k.info.nombre,k.info.unidad,{v:+k.q.toFixed(3),s:S.num},M(k.prom),M(k.v)])],anchos:[44,10,12,16,16]}];
 }
 async function guardarCont(msg){if(modo==="compartido"){try{await db.doc("config/contable").set(clone(CONT));if(msg)toast(msg)}catch(err){
+    // sin internet: lo de fondo (numeración, reglas aprendidas) se vuelve a intentar solo; solo se avisa si fue una acción de la persona
+    if(err?.code==="offline"){if(msg)toast(err.msg||"Sin internet: este cambio necesita conexión.");return}
     toast(err?.msg||"No se pudo guardar ("+(err.code||"error")+")");
     // si el servidor no lo aceptó, la pantalla no debe quedarse mostrando un cambio que no existe: se vuelve a leer lo guardado
     try{const s=await db.doc("config/contable").get();CONT=s.exists?{...clone(CONT_DEF),...s.data()}:clone(CONT_DEF);render()}catch{}}}else if(msg)toast(msg)}

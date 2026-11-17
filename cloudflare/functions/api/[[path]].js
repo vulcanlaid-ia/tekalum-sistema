@@ -50,6 +50,9 @@ function limpioSrv(o) {
   for (const [k, v] of Object.entries(o || {})) if (!VOLATILES_SRV.has(k) && k !== "id") r[k] = v;
   return r;
 }
+// el documento sin los sellos que pone el servidor (quién lo creó y quién lo editó): para saber si un reenvío es idéntico
+const SELLOS = new Set(["_creadoPor", "_creadoNombre", "_creadoF", "_editadoPor", "_editadoNombre", "_editadoF"]);
+const sinSellos = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !SELLOS.has(k)));
 // comparación de dos documentos que no dependa del orden en que quedaron las llaves (JSON.stringify sí lo distingue,
 // y sellar() agrega _editadoPor/_editadoNombre/_editadoF al final del documento nuevo, en un orden que no tenía el viejo)
 function canon(o) {
@@ -277,11 +280,30 @@ async function revisarPermiso(env, sesion, col, id, data, previo, borrar) {
 const ID_VALIDO = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
 const MAX_BYTES = 1024 * 1024;
 
-const json = (data, status = 200) =>
+const json = (data, status = 200, extra = {}) =>
   new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra },
   });
+
+// ---------- Sincronización liviana: la pantalla no baja todo cada 15 s, solo pregunta si algo cambió ----------
+// versión = cuántos documentos hay y cuál es la fecha del último cambio (sobre lo que este rol puede ver)
+const SYNC_FUERA = ["archivos_img", "_sistema", "publicas"];
+function filtroSync(rol) {
+  const ocultas = [...SYNC_FUERA, ...COLECCIONES.filter((c) => nivelDe(rol, c) === "-")];
+  return { sql: ocultas.map((_, i) => "?" + (i + 1)).join(","), args: ocultas };
+}
+async function versionDe(env, rol) {
+  const f = filtroSync(rol);
+  const r = await env.DB.prepare("SELECT count(*) AS n, max(updated) AS u FROM docs WHERE col NOT IN (" + f.sql + ")").bind(...f.args).first();
+  return { n: r?.n || 0, u: r?.u || "" };
+}
+function agrupar(filas, rol) {
+  const out = {};
+  for (const r of filas) (out[r.col] ||= []).push({ id: r.id, data: JSON.parse(r.data) });
+  for (const c of Object.keys(out)) { out[c] = filtrarLectura(rol, c, out[c]); if (!out[c].length) delete out[c]; }
+  return out;
+}
 
 async function leerCuerpo(request) {
   const texto = await request.text();
@@ -490,14 +512,25 @@ export async function onRequest({ request, env, params }) {
 
     if (ruta === "ia") return await ia(request, env, metodo);
 
+    if (ruta === "version" && metodo === "GET") return json(await versionDe(env, sesion.rol));
+    if (ruta === "cambios" && metodo === "GET") {
+      // solo los documentos tocados desde la fecha dada (se repiten los del mismo instante por si hubo dos cambios juntos)
+      const desde = new URL(request.url).searchParams.get("desde") || "";
+      const ver = await versionDe(env, sesion.rol), f = filtroSync(sesion.rol);
+      const { results } = await env.DB.prepare("SELECT col, id, data FROM docs WHERE col NOT IN (" + f.sql + ") AND updated >= ?" + (f.args.length + 1)).bind(...f.args, desde).all();
+      const por = agrupar(results, sesion.rol), docs = [];
+      for (const [col, L] of Object.entries(por)) for (const d of L) docs.push({ col, id: d.id, data: d.data });
+      return json({ ver, docs });
+    }
     if (ruta === "all" && metodo === "GET") {
       // las imágenes completas (archivos_img) se piden una por una al abrirlas
       await sembrar(env);
+      const verAll = await versionDe(env, sesion.rol); // se mide ANTES de leer: si algo cambia en medio, la próxima consulta lo trae
       const { results } = await env.DB.prepare("SELECT col, id, data FROM docs WHERE col <> 'archivos_img' AND col <> '_sistema' AND col <> 'publicas'").all();
       const out = {};
       for (const r of results) (out[r.col] ||= []).push({ id: r.id, data: JSON.parse(r.data) });
       for (const c of Object.keys(out)) { out[c] = filtrarLectura(sesion.rol, c, out[c]); if (!out[c].length && nivelDe(sesion.rol, c) === "-") delete out[c]; }
-      return json(out);
+      return json(out, 200, { "x-ver": JSON.stringify(verAll) });
     }
 
     if (ruta !== "docs" || !COLECCIONES.includes(col)) return json({ error: "Ruta no encontrada" }, 404);
@@ -526,6 +559,8 @@ export async function onRequest({ request, env, params }) {
       const fila0 = col === "archivos_img" ? null : await env.DB.prepare("SELECT data FROM docs WHERE col = ?1 AND id = ?2").bind(col, id).first();
       const previo = fila0 ? JSON.parse(fila0.data) : null;
       if (col !== "config") sellar(data, previo, sesion);
+      // si ya está guardado exactamente así (un reenvío al volver el internet), no se vuelve a escribir ni a anotar
+      if (previo && col !== "archivos_img" && !SOLO_AGREGAR.includes(col) && canon(sinSellos(previo)) === canon(sinSellos(data))) return json({ ok: true, data }); // se devuelve lo que mandó, no lo guardado
       const errPerm = await revisarPermiso(env, sesion, col, id, data, previo, false);
       if (errPerm) return json({ error: errPerm }, 403);
       const errCierre = await revisarCierreServidor(env, col, data, previo);

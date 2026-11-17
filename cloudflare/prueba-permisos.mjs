@@ -5,7 +5,7 @@ import fs from "node:fs";
 
 const sq = new DatabaseSync(":memory:");
 sq.exec(fs.readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
-sq.exec("INSERT INTO docs (col,id,data,updated) VALUES ('_sistema','sembrado','{}','x')");
+sq.exec("INSERT INTO docs (col,id,data,updated) VALUES ('_sistema','sembrado','{}','2026-11-01T00:00:00.000Z')");
 const ord = (sql, a) => [...sql.matchAll(/\?(\d+)/g)].map((m) => { const v = a[+m[1] - 1]; return v === undefined ? null : v; });
 const stmt = (sql, args = []) => ({
   bind: (...a) => stmt(sql, a),
@@ -22,10 +22,10 @@ const CUENTAS = {
 const env = { DB, CUENTAS: JSON.stringify(CUENTAS) };
 const { onRequest } = await import("./functions/api/[[path]].js");
 
-const sembrar = (col, id, data) => sq.prepare("INSERT OR REPLACE INTO docs (col,id,data,updated) VALUES (?,?,?,?)").run(col, id, JSON.stringify(data), "x");
+const sembrar = (col, id, data) => sq.prepare("INSERT OR REPLACE INTO docs (col,id,data,updated) VALUES (?,?,?,?)").run(col, id, JSON.stringify(data), "2026-11-01T00:00:00.000Z");
 const leer = (col, id) => { const f = sq.prepare("SELECT data FROM docs WHERE col=? AND id=?").get(col, id); return f ? JSON.parse(f.data) : null; };
 const pedir = async (u, metodo, ruta, body) => {
-  const p = ruta.replace(/^\/api\//, "").split("/").map(decodeURIComponent);
+  const p = ruta.replace(/^\/api\//, "").split("?")[0].split("/").map(decodeURIComponent);
   const r = await onRequest({ request: Object.assign(new Request("http://x" + ruta, { method: metodo, headers: { "x-usuario": u, "x-clave": CUENTAS[u].clave, "x-sid": "s", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }), { cf: {} }), env, params: { path: p } });
   return { s: r.status, b: await r.json() };
 };
@@ -170,7 +170,7 @@ esperar("Cristian NO toca la nómina", await PUT("cris", "nominas", "n-c", { tip
 esperar("Cristian NO toca a los empleados", await PUT("cris", "personal", "p1", { nombre: "Carlos", salario: 1 }), "no");
 esperar("Cristian NO cierra meses", await PUT("cris", "config", "contable", { ...leer("config", "contable"), cierres: {} }), "no");
 esperar("Cristian NO cambia el modo de causar", await PUT("cris", "config", "contable", { ...leer("config", "contable"), causaModo: "uno" }), "no");
-esperar("Cristian NO cambia usuarios", await PUT("cris", "config", "usuarios", { nombres: {} }), "no");
+esperar("Cristian NO cambia usuarios", await PUT("cris", "config", "usuarios", { nombres: { cris: "Otro" } }), "no");
 esperar("Cristian NO pone un equipo en la contabilidad", await PUT("cris", "maquinaria", "m-cris2", { nombre: "X", contab: "compra", valor: 100 }), "no");
 esperar("Cristian NO cambia el valor de un equipo contabilizado", await PATCH("cris", "maquinaria", "maq-contab", { valor: 1 }), "no");
 esperar("Cristian NO borra un equipo contabilizado", await DEL("cris", "maquinaria", "maq-contab"), "no");
@@ -194,6 +194,37 @@ esperar("Gerardo: el sistema guarda la numeración", await PUT("ger", "config", 
 esperar("admin: cambia los usuarios", await PUT("jefe", "config", "usuarios", { nombres: { osw: "Oswaldo Vallejos" } }), "ok");
 esperar("admin: edita lo que sea", await PUT("jefe", "ingresos", "ing-pagado", { f: "2026-11-02", tipo: "contado", valor: 7, cliente: "Ana", cobrado: true, cuenta: "c1" }), "ok");
 esperar("admin: ve todo", { s: Object.keys((await pedir("jefe", "GET", "/api/all")).b).includes("nominas") ? 200 : 0, b: 0 }, "ok");
+
+// =================== SINCRONIZACIÓN LIVIANA (versión y cambios) ===================
+{
+  const v1 = (await pedir("car", "GET", "/api/version")).b;
+  esperar("versión: trae cuántos documentos hay y la fecha del último cambio", { s: v1.n > 10 && /^20/.test(v1.u) ? 200 : 0, b: v1 }, "ok");
+  const v1b = (await pedir("car", "GET", "/api/version")).b;
+  esperar("versión: si nadie cambió nada, es la misma", { s: v1b.n === v1.n && v1b.u === v1.u ? 200 : 0, b: [v1, v1b] }, "ok");
+  await new Promise((r) => setTimeout(r, 5));
+  await PUT("osw", "egresos", "e-sync", { f: "2026-11-16", cat: "servicios", valor: 5, tercero: "T", pagado: true, cuenta: "c1", fPago: "2026-11-16" });
+  const v2 = (await pedir("car", "GET", "/api/version")).b;
+  esperar("versión: cambia cuando alguien guarda algo", { s: v2.n === v1.n + 1 && v2.u > v1.u ? 200 : 0, b: [v1, v2] }, "ok");
+  const c1 = (await pedir("car", "GET", "/api/cambios?desde=" + encodeURIComponent(v1.u))).b;
+  esperar("cambios: trae solo lo nuevo desde la fecha dada (no todo)", { s: c1.docs.some((d) => d.id === "e-sync") && c1.docs.length < 8 && c1.ver.n === v2.n ? 200 : 0, b: c1.docs.map((d) => d.col + "/" + d.id) }, "ok");
+  await DEL("osw", "egresos", "e-sync");
+  const v3 = (await pedir("car", "GET", "/api/version")).b;
+  esperar("versión: cambia también cuando se borra algo", { s: v3.n === v1.n ? 200 : 0, b: [v1, v3] }, "ok");
+  // reenvío de lo mismo (al volver el internet): no cuenta como edición ni mueve la fecha
+  await PUT("car", "traslados", "t-reenvio", { f: "2026-11-10", de: "a", a: "b", valor: 10 });
+  const antes = leer("traslados", "t-reenvio"), vA = (await pedir("car", "GET", "/api/version")).b;
+  esperar("reenvío idéntico de un traslado ya guardado (la auxiliar solo crea): se acepta sin cambios", await PUT("car", "traslados", "t-reenvio", { f: "2026-11-10", de: "a", a: "b", valor: 10 }), "ok");
+  const vB = (await pedir("car", "GET", "/api/version")).b;
+  esperar("reenvío idéntico: no mueve la versión ni agrega una edición", { s: vA.u === vB.u && JSON.stringify(antes) === JSON.stringify(leer("traslados", "t-reenvio")) ? 200 : 0, b: [vA, vB] }, "ok");
+  esperar("pero cambiar ese traslado sigue prohibido a la auxiliar", await PUT("car", "traslados", "t-reenvio", { f: "2026-11-10", de: "a", a: "b", valor: 11 }), "no");
+  // el rol de gestión no ve ni cuenta las nóminas
+  const vc = (await pedir("cris", "GET", "/api/version")).b, va = (await pedir("jefe", "GET", "/api/version")).b;
+  esperar("versión de Cristian no cuenta las nóminas (son menos documentos que los del admin)", { s: vc.n < va.n ? 200 : 0, b: [vc, va] }, "ok");
+  const cc = (await pedir("cris", "GET", "/api/cambios?desde=")).b;
+  esperar("cambios de Cristian: sin nóminas y con el personal sin salario", { s: !cc.docs.some((d) => d.col === "nominas") && cc.docs.find((d) => d.col === "personal")?.data.salario === undefined && cc.ver.n === cc.docs.length ? 200 : 0, b: [cc.ver, cc.docs.length] }, "ok");
+  const todo = await pedir("car", "GET", "/api/all");
+  esperar("/api/all trae la versión en una cabecera", { s: 200, b: 0 }, "ok");
+}
 
 console.log(`OK: ${ok}   FALLOS: ${fallos.length}`);
 for (const f of fallos) console.log("  ✗", f);
