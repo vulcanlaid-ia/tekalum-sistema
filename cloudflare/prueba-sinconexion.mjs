@@ -21,6 +21,8 @@ sembrar("_sistema", "sembrado", {});
 sembrar("config", "contable", { cierres: { "2026-09": { f: "2026-09-30" } }, numAsig: {}, reglasProv: {} });
 sembrar("config", "precios", { operacion: {} });
 sembrar("cuentas", "c1", { nombre: "Caja menor", tipo: "caja", saldoIni: 100000, fIni: "2026-10-01", activa: true });
+sembrar("egresos", "eg-credito1", { f: "2026-11-05", cat: "materiales", valor: 70000, tercero: "Prov A", pagado: false, concepto: "Factura A" });
+sembrar("egresos", "eg-credito2", { f: "2026-11-05", cat: "materiales", valor: 80000, tercero: "Prov B", pagado: false, concepto: "Factura B" });
 sembrar("egresos", "eg-viejo", { f: "2026-10-20", cat: "servicios", valor: 50000, tercero: "Luz", pagado: true, cuenta: "c1", fPago: "2026-10-20", concepto: "Servicios" });
 const ord = (sql, a) => [...sql.matchAll(/\?(\d+)/g)].map((m) => { const v = a[+m[1] - 1]; return v === undefined ? null : v; });
 const stmt = (sql, args = []) => ({
@@ -59,8 +61,8 @@ const server = http.createServer(async (req, res) => {
     if (f === "index.html" && extraHtml) { const t = cuerpo.toString(), i = t.lastIndexOf("</body>"); cuerpo = Buffer.from(t.slice(0, i) + extraHtml + t.slice(i)); }
     const etag = "\"" + crypto.createHash("sha1").update(cuerpo).digest("hex") + "\"";
     if (f === "index.html" && retardo.index) await dormir(retardo.index);
-    if (req.headers["if-none-match"] === etag) { res.writeHead(304, { etag, "cache-control": "no-cache" });res.end();return; }
-    res.writeHead(200, { "content-type": TIPOS[path.extname(ruta)] || "application/octet-stream", "cache-control": "no-cache", etag });res.end(cuerpo);
+    void etag; // Cloudflare Pages no envía ETag en la página: el servidor de prueba tampoco
+    res.writeHead(200, { "content-type": TIPOS[path.extname(ruta)] || "application/octet-stream", "cache-control": "public, max-age=0, must-revalidate" });res.end(cuerpo);
   } catch (e) { res.writeHead(500);res.end(String(e)); }
 });
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
@@ -71,7 +73,7 @@ const enServidor = (col, id) => { const f = sq.prepare("SELECT data FROM docs WH
 // ---- Chrome ----
 fs.rmSync(dir + "/profsinred", { recursive: true, force: true });
 const ch = spawn(process.env.CHROME || ["C:/Program Files/Google/Chrome/Application/chrome.exe","/usr/bin/google-chrome","/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"].find((x) => fs.existsSync(x)), ["--headless=new", "--remote-debugging-port=9464", "--user-data-dir=" + dir + "/profsinred", "about:blank"]);
-const w = (ms) => new Promise((r) => setTimeout(r, ms));await w(2500);
+const w = (ms) => new Promise((r) => setTimeout(r, ms));for (let i = 0; i < 40; i++) { try { await fetch("http://127.0.0.1:9464/json"); break; } catch { await w(250); } }
 const t = await (await fetch("http://127.0.0.1:9464/json")).json();
 const ws = new WebSocket(t.find((x) => x.type === "page").webSocketDebuggerUrl);await new Promise((r) => (ws.onopen = r));
 let id = 0;const p = {}, err = [], reqs = {}, bytes = [];
@@ -194,16 +196,53 @@ console.log("  con la página tardando 7 s y los datos 9 s, el sistema abrió en
 chk("con internet lenta abre en menos de 4 s usando la copia guardada (no espera a bajar nada)", rapido && seg < 4, seg);
 chk("ya muestra el menú de su rol sin esperar al servidor", (await ev(`document.body.dataset.rolfin`)) === "limitado");
 chk("el aviso blanco de \"Cargando…\" desaparece", await ev(`!document.getElementById("vye-carga")`));
-// una versión nueva publicada mientras tanto: se avisa y se actualiza con un botón
+// la MISMA página (sin ETag, como en Cloudflare): al abrir varias veces NO debe aparecer el aviso de versión nueva
+retardo.index = 0;retardo.all = 0;
+const olvidarRevision = () => ev(`caches.open("tekalum-v4").then(c=>c.delete("/shell-revisado")).then(()=>1)`);
+for (let i = 0; i < 2; i++) { await olvidarRevision(); await c("Page.reload"); await esperar(`typeof store!=="undefined"&&modo==="compartido"`, 20); await w(2500); }
+chk("con la misma página y sin ETag NO aparece el aviso de versión nueva (el error de hoy)", await ev(`!document.getElementById("vye-nueva")`));
+// se revisa como máximo cada 10 minutos: abrir de nuevo no vuelve a bajar la página
+const antesIdx = golpes["estatico:index"] || 0;await c("Page.reload");await esperar(`typeof store!=="undefined"&&modo==="compartido"`, 20);await w(1500);
+chk("abrir otra vez enseguida no vuelve a bajar la página (ahorra datos)", (golpes["estatico:index"] || 0) === antesIdx, [antesIdx, golpes["estatico:index"]]);
+// una versión nueva publicada: se avisa y se actualiza con un botón
 retardo.index = 500;retardo.all = 0;extraHtml = "<script>window.__nueva=1</script>";
+await olvidarRevision();
 await c("Page.reload");
 chk("con una versión nueva publicada aparece el aviso 'Actualizar'", await esperar(`!!document.getElementById("vye-nueva")`, 20));
 await ev(`document.querySelector("#vye-nueva button")?.click()`);
 chk("al pulsar Actualizar queda la versión nueva", await esperar(`window.__nueva===1`, 20));
+chk("después de actualizar, el aviso ya no vuelve a salir", await (async () => { await olvidarRevision(); await c("Page.reload"); await esperar(`window.__nueva===1`, 20); await w(3000); return ev(`!document.getElementById("vye-nueva")`); })());
 chk("y sigue abriendo normal con sus datos", await esperar(`store.egresos.length>3&&modo==="compartido"`, 20));
 extraHtml = "";retardo.index = 0;
 
-// =============== 8. Consumo de datos ===============
+// =============== 8. Lotes atómicos y conflictos con otra sesión ===============
+await w(1500);
+// 8a. con internet: otra persona cambia la factura A en el servidor; la pantalla de la auxiliar aún tiene la versión vieja
+sq.prepare("UPDATE docs SET data = json_set(data, '$.concepto', 'Factura A (corregida por el contador)'), updated = ? WHERE col='egresos' AND id='eg-credito1'").run(new Date().toISOString());
+const rConf = await ev(`guardarDoc("egresos","eg-credito1",{...store.egresos.find(e=>e.id==="eg-credito1"),pagado:true,cuenta:"c1",fPago:"2026-11-17",fPagoReg:"2026-11-17T12:00:00Z"}).then(()=>"GUARDÓ",e=>"rechazado: "+(e.msg||e.message))`);
+chk("con internet: si otra persona cambió el documento, NO se pisa su cambio y se avisa", /cambió en otra sesión/i.test(rConf), rConf);
+chk("con internet: la corrección del contador sigue intacta en el servidor", /corregida por el contador/.test(enServidor("egresos","eg-credito1").concepto) && enServidor("egresos","eg-credito1").pagado === false);
+// 8b. sin internet: una operación agrupada (dos egresos juntos) queda como UNA sola entrada y sube completa
+await offline(true);await w(400);
+await ev(`atomico(async()=>{await guardarDoc("egresos",null,{f:"2026-11-17",cat:"servicios",valor:1111,tercero:"Lote",pagado:true,cuenta:"c1",fPago:"2026-11-17",concepto:"Lote parte 1"});await guardarDoc("egresos",null,{f:"2026-11-17",cat:"servicios",valor:2222,tercero:"Lote",pagado:true,cuenta:"c1",fPago:"2026-11-17",concepto:"Lote parte 2"})}).then(()=>1)`);
+chk("sin internet: la operación agrupada queda como una sola entrada en espera", (await ev(`window.VYE_COLA.pendientes()`)) === 1);
+chk("sin internet: las dos partes se ven en pantalla", await ev(`store.egresos.filter(e=>/Lote parte/.test(e.concepto||"")).length===2`));
+// 8c. sin internet: pagar la factura B mientras el contador la cambia en el servidor
+await ev(`guardarDoc("egresos","eg-credito2",{...store.egresos.find(e=>e.id==="eg-credito2"),pagado:true,cuenta:"c1",fPago:"2026-11-17",fPagoReg:"2026-11-17T12:00:00Z"})`);
+chk("sin internet: el pago queda en espera (2 entradas)", (await ev(`window.VYE_COLA.pendientes()`)) === 2);
+sq.prepare("UPDATE docs SET data = json_set(data, '$.concepto', 'Factura B (corregida por el contador)'), updated = ? WHERE col='egresos' AND id='eg-credito2'").run(new Date().toISOString());
+await offline(false);
+chk("al volver: se sube lo pendiente", await esperar(`window.VYE_COLA.pendientes()===0`, 40));
+chk("la operación agrupada subió completa (las dos partes)", sq.prepare("SELECT count(*) n FROM docs WHERE col='egresos' AND data LIKE '%Lote parte%'").get().n === 2);
+chk("el pago de B NO pisó la corrección del contador", /corregida por el contador/.test(enServidor("egresos","eg-credito2").concepto) && enServidor("egresos","eg-credito2").pagado === false);
+const fall = await ev(`window.VYE_COLA.fallidos()`);
+chk("el pago en conflicto NO se perdió en silencio: queda en el panel", fall === 1, fall);
+await ev(`document.getElementById("vye-estado")?.click()`);await w(300);
+const panel2 = await ev(`document.getElementById("vye-panel")?.innerText||""`);
+chk("el panel explica que otra sesión cambió el documento", /cambió en otra sesión/i.test(panel2), panel2.slice(0, 160));
+await ev(`window.confirm=()=>true;document.querySelectorAll('[data-vp="descartar"]').forEach(b=>b.click());document.getElementById("vye-panel")?.remove()`);await w(300);
+
+// =============== 9. Consumo de datos ===============
 const apiBytes = bytes.filter(([u]) => u.includes("/api/")).reduce((s, [, b]) => s + b, 0);
 console.log("\nTráfico /api del navegador en toda la prueba:", Math.round(apiBytes / 1024), "KB");
 console.log("Llamadas:", JSON.stringify(golpes));

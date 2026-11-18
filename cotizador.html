@@ -2539,6 +2539,7 @@ async function cambiarEstado(id,estado){
     else{q.estado=estado;q["f_"+estado]=ahora;render()}
     toast(`${q.numero} → ${ESTADO_NOMBRE[estado]}`);
     if(estado==="aprobada"&&!otDeCot(id))await crearOT(q);
+    if(estado==="aprobada"&&window.COTFIN)COTFIN.abrir(id);
   }catch(e){toast("No se pudo actualizar: "+(e.code||"error"))}
 }
 async function eliminar(id){
@@ -3634,10 +3635,18 @@ const pillStock=e=>`<span class="pill ${ESTADO_STOCK[e][0]}">${ESTADO_STOCK[e][1
 const COLECCIONES=["nominas","bodega","maquinaria","proveedores","personal","ordenes","retazos","chatarra","caja","auditoria","archivos","compras","egresos","inversion","aprendizaje","referencias","conjuntos","sistemas","personalizadas","ingresos","cuentas","traslados","asientos","terceros","ventas","notasdoc","items"];
 const store=Object.fromEntries(COLECCIONES.map(c=>[c,[]]));store.archivos_img=[]; // imágenes completas: no se sincronizan, se piden al abrirlas
 function guardarLocal(col,row){const arr=store[col];if(!arr)return;const i=arr.findIndex(x=>x.id===row.id);if(i>=0)arr[i]=row;else arr.push(row)}
+async function atomico(fn){
+  if(modo==="compartido"){
+    if(!db.atomic)throw {msg:"Actualiza la página para guardar esta operación completa."};
+    return db.atomic(fn);
+  }
+  const antes=clone(store),cont=clone(CONT),qs=clone(quotes);
+  try{return await fn()}catch(e){Object.assign(store,antes);CONT=cont;quotes=qs;render();throw e}
+}
 async function guardarDoc(col,id,data){
   revisarCierre(col,id,data);
   const body=JSON.parse(JSON.stringify(data));delete body.id;
-  if(modo==="compartido"){const ref=id?db.doc(col+"/"+id):db.collection(col).doc();await ref.set(body);guardarLocal(col,{id:ref.id,...body});return ref.id}
+  if(modo==="compartido"){const ref=id?db.doc(col+"/"+id):db.collection(col).doc();const remoto=await ref.set(body);guardarLocal(col,{id:ref.id,...(remoto||body)});return ref.id}
   const nid=id||("loc"+uid4()+uid4()),arr=store[col],i=arr.findIndex(x=>x.id===nid),row={id:nid,...body};
   if(i>=0)arr[i]=row;else arr.push(row);render();return nid;
 }
@@ -3788,8 +3797,9 @@ function formIngreso(){
     <div class="row" style="margin-top:14px"><button class="btn primary" data-b="ing-guardar">${loc?"Registrar factura de la adecuación":"Registrar ingreso a bodega"}</button><span class="who">${loc?"Queda en Facturas de compra, en la contabilidad y en la inversión.":"Se suma a las existencias y queda en el historial de movimientos."}</span></div>
   </div>`;
 }
-async function guardarIngreso(){
-  if(ingDraft.destino==="local"||ingDraft.destino==="gasto")return guardarFacturaLocal();
+async function guardarIngreso(){return atomico(guardarIngresoDentro)}
+async function guardarIngresoDentro(){
+  if(ingDraft.destino==="local"||ingDraft.destino==="gasto")return guardarFacturaLocalDentro();
   const d=ingDraft,lineas=d.lineas.filter(l=>l.mat&&+l.cant>0);
   if(!lineas.length)throw {msg:"Agrega al menos un material con cantidad"};
   if(lineas.some(l=>l.mat==="otro"&&!l.nombre.trim()))throw {msg:"Escribe el nombre de los materiales nuevos"};
@@ -5195,16 +5205,16 @@ document.addEventListener("click",async e=>{
       const c=catEg(egDraft.cat),old=egDraft.editId?store.egresos.find(x=>x.id===egDraft.editId):null,ex=egDraft.extra||[];
       if(ex.some(x=>!(+x.valor>0))){toast("Escribe el valor de cada gasto de la transacción, o quita el que sobra");return}
       const tx=ex.length?(old?.tx||"tx"+Date.now().toString(36)+uid4()):"";
-      const idMain=await guardarDoc("egresos",old?old.id:null,{...(old||{}),tx,cc:egDraft.cc||"",f:egDraft.f,cat:egDraft.cat,tipo:egDraft.tipo,concepto:egDraft.concepto.trim()||c[1],valor:v,nota:egDraft.nota.trim(),tercero:egDraft.tercero.trim(),cotId:["materiales","taller"].includes(c[3])?egDraft.cotId:"",pagado:pag,credito:!pag||!!old?.credito,ds:!!egDraft.ds,cuenta:pag?egDraft.cuenta:"",fPago:pag?(old&&old.pagado!==false&&old.fPago&&old.f===egDraft.f?old.fPago:old?.credito&&old.pagado!==false&&old.fPago?old.fPago:egDraft.f):"",puc:c[4],creado:old?.creado||new Date().toISOString(),por:old?old.por??null:(myId||null),...(old?{editado:new Date().toISOString(),editadoPor:myId||null}:{})});
+      await atomico(async()=>{const idMain=await guardarDoc("egresos",old?old.id:null,{...(old||{}),tx,cc:egDraft.cc||"",f:egDraft.f,cat:egDraft.cat,tipo:egDraft.tipo,concepto:egDraft.concepto.trim()||c[1],valor:v,nota:egDraft.nota.trim(),tercero:egDraft.tercero.trim(),cotId:["materiales","taller"].includes(c[3])?egDraft.cotId:"",pagado:pag,credito:!pag||!!old?.credito,ds:!!egDraft.ds,cuenta:pag?egDraft.cuenta:"",fPago:pag?(old&&old.pagado!==false&&old.fPago&&old.f===egDraft.f?old.fPago:old?.credito&&old.pagado!==false&&old.fPago?old.fPago:egDraft.f):"",puc:c[4],creado:old?.creado||new Date().toISOString(),por:old?old.por??null:(myId||null),...(old?{editado:new Date().toISOString(),editadoPor:myId||null}:{})});
       const fp=store.egresos.find(y=>y.id===idMain)?.fPago||(pag?egDraft.f:"");
       for(const x of ex){const o=x.id?store.egresos.find(y=>y.id===x.id):null,cx=catEg(x.cat);
         await guardarDoc("egresos",o?o.id:null,{...(o||{}),tx,cc:x.cc||"",f:egDraft.f,cat:x.cat,tipo:cx[2],concepto:String(x.concepto||"").trim()||cx[1],valor:+x.valor,nota:egDraft.nota.trim(),tercero:egDraft.tercero.trim(),cotId:"",pagado:pag,credito:!pag||!!o?.credito||!!old?.credito,ds:!!egDraft.ds,cuenta:pag?egDraft.cuenta:"",fPago:pag?fp:"",puc:cx[4],creado:o?.creado||new Date().toISOString(),por:o?o.por??null:(myId||null),...(o?{editado:new Date().toISOString(),editadoPor:myId||null}:{})})}
-      for(const id of egDraft.quitados||[])if(store.egresos.some(y=>y.id===id))await borrarDoc("egresos",id);
+      for(const id of egDraft.quitados||[])if(store.egresos.some(y=>y.id===id))await borrarDoc("egresos",id);});
       egMes=egDraft.f.slice(0,7);egDraft={...egNuevo(),f:egDraft.f,cuenta:egDraft.cuenta||cuentasActivas()[0]?.id||""};finModal=null;toast(old?"Egreso actualizado":"Egreso registrado");render();break}
     case "editar":{const x=store.egresos.find(y=>y.id===b.dataset.id);if(!x)return;egDraft={...egNuevo(),...x,valor:String(x.valor??""),pagado:x.pagado===false?"no":"si",tercero:x.tercero||"",concepto:x.concepto||"",nota:x.nota||"",cotId:x.cotId||"",ds:!!x.ds,catManual:true,editId:x.id,cc:x.cc||"",quitados:[],extra:x.tx?store.egresos.filter(y=>y.tx===x.tx&&y.id!==x.id).map(y=>({id:y.id,cat:y.cat,concepto:y.concepto||"",valor:String(y.valor??""),cc:y.cc||""})):[]};finModal="egreso";render();setTimeout(()=>$("#eg-valor")?.focus(),40);break}
     case "pagar":{
       const x=store.egresos.find(y=>y.id===b.dataset.id);if(!x)return;const sel=document.querySelector(`[data-eg-pagar-cta="${x.id}"]`);
-      for(const y of txDe(x).filter(y=>y.pagado===false))await guardarDoc("egresos",y.id,{...y,pagado:true,cuenta:sel?.value||"",fPago:hoyISO(),fPagoReg:new Date().toISOString()});toast("Pago registrado");render();break}
+      await atomico(async()=>{for(const y of txDe(x).filter(y=>y.pagado===false))await guardarDoc("egresos",y.id,{...y,pagado:true,cuenta:sel?.value||"",fPago:hoyISO(),fPagoReg:new Date().toISOString()})});toast("Pago registrado");render();break}
     case "borrar":{
       const x=store.egresos.find(y=>y.id===b.dataset.id);if(!x)return;
       if(!confirm(`¿Borrar el egreso "${x.concepto}" por ${cop(x.valor)}?`))return;
@@ -5243,8 +5253,8 @@ const cuentasActivas=()=>store.cuentas.filter(c=>c.activa!==false).sort((a,b)=>(
 const opcCuentas=sel=>`<option value="">Sin cuenta</option>`+cuentasActivas().map(c=>`<option value="${esc(c.id)}" ${sel===c.id?"selected":""}>${esc(nombreCuenta(c.id))}</option>`).join("");
 // obras vendidas: cotizaciones aprobadas, en producción o instaladas (sin las obras propias)
 const obrasVendidas=()=>quotes.filter(q=>GANADAS.includes(q.estado)&&!q.interna).sort((a,b)=>String(b.f_aprobada||b.actualizada||b.creada).localeCompare(String(a.f_aprobada||a.actualizada||a.creada)));
-const cobradoDe=id=>store.ingresos.filter(i=>i.cotId===id&&ING_VENTA.includes(i.tipo)).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
-function carteraDe(q){const total=Math.round(totalDe(q)),cob=cobradoDe(q.id),saldo=Math.max(0,total-cob),ant=Math.round(total*.6);
+const cobradoDe=id=>store.ingresos.filter(i=>i.cotId===id&&i.cobrado!==false&&ING_VENTA.includes(i.tipo)).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
+function carteraDe(q){const total=Math.round(totalDe(q)),cob=cobradoDe(q.id),saldo=Math.max(0,total-cob),ant=Math.round(total*(q.condicionesPago?.porcentajeInicial??60)/100);
   return {q,total,cob,saldo,ant,estado:saldo<=0?"pagada":cob+1<ant?"anticipo":"saldo"}}
 // saldo de una cuenta: saldo inicial + ingresos + aportes en dinero − egresos pagados ± traslados
 function saldoCuenta(id){
@@ -5294,7 +5304,7 @@ function vIngresos(){
         <label class="f full">Concepto<input id="ing-concepto" data-fik="concepto" value="${esc(D.concepto)}" placeholder="Ej. Anticipo 60 % puerta principal"></label>
         <label class="f full">Nota<input id="ing-nota" data-fik="nota" value="${esc(D.nota)}" placeholder="Opcional: número de transferencia, recibo…"></label>
       </div>
-      ${cot?`<div class="who" style="margin-top:8px">Cotización ${esc(cot.q.numero)}: total ${cop(cot.total)} · cobrado ${cop(cot.cob)} · saldo <b>${cop(cot.saldo)}</b>${cot.cob<cot.ant?` · anticipo del 60 %: ${cop(cot.ant-cot.cob)}`:""}
+      ${cot?`<div class="who" style="margin-top:8px">Cotización ${esc(cot.q.numero)}: total ${cop(cot.total)} · cobrado ${cop(cot.cob)} · saldo <b>${cop(cot.saldo)}</b>${cot.cob<cot.ant?` · anticipo acordado: ${cop(cot.ant-cot.cob)}`:""}
         <span class="row" style="gap:6px;margin-top:6px">${cot.cob<cot.ant?`<button class="btn small" data-fi="poner" data-v="${cot.ant-cot.cob}">Poner anticipo ${cop(cot.ant-cot.cob)}</button>`:""}${cot.saldo>0?`<button class="btn small" data-fi="poner" data-v="${cot.saldo}">Poner saldo ${cop(cot.saldo)}</button>`:""}</span></div>`:""}
       ${causa?`<div class="notice" style="margin-top:10px">Se registra el ingreso hoy (causación) y queda como <b>cuenta por cobrar</b> a nombre de quien debe. Cuando entre el dinero, pulsa <b>Cobrar</b> en la lista de "Por cobrar".</div>`:""}
       ${!causa&&(!D.editId||D.tx)?`<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">${(D.extra||[]).length?`<div class="who" style="margin-bottom:6px">Otros ingresos de esta misma transacción (misma fecha y misma cuenta; quedan en un solo recibo de caja):</div>`:""}
@@ -5360,7 +5370,7 @@ function vCartera(){
   return `<div class="head"><div><div class="eyebrow">Ventas</div><h1>Cartera</h1><p>Lo que deben los clientes de cada obra vendida. El anticipo de referencia es el 60 % al empezar y el 40 % al entregar. Los pagos se registran en Ingresos.</p></div></div>
   <div class="kpis">
     ${kpi("Por cobrar",cop(sum(R,r=>r.saldo)),`${R.filter(r=>r.saldo>0).length} obra${R.filter(r=>r.saldo>0).length===1?"":"s"}`)}
-    ${kpi("Anticipos pendientes",cop(sum(R.filter(r=>r.estado==="anticipo"),r=>r.ant-r.cob)),`${R.filter(r=>r.estado==="anticipo").length} sin el 60 % completo`)}
+    ${kpi("Anticipos pendientes",cop(sum(R.filter(r=>r.estado==="anticipo"),r=>r.ant-r.cob)),`${R.filter(r=>r.estado==="anticipo").length} sin el anticipo completo`)}
     ${kpi("Cobrado",cop(sum(R,r=>r.cob)),"de las obras vendidas")}
     ${kpi("Vendido",cop(sum(R,r=>r.total)),`${R.length} obra${R.length===1?"":"s"} aprobada${R.length===1?"":"s"}`)}
   </div>
@@ -5707,7 +5717,7 @@ function asientosTodos(conCierre){
   // ventas: la obra se vuelve cuenta por cobrar del cliente; lo recibido antes (anticipos) se cruza ese día
   const ventas={};for(const q of quotes){const vd=cotFacturada(q.id),f=vd?String(vd.f).slice(0,10):fechaVenta(q);if(!f)continue;ventas[q.id]=f;
     if(!vd)add("FV",f,"Venta · "+q.numero,q.cliente?.nombre,[{cta:mapa("cxc"),d:totalDe(q)},{cta:mapa("venta"),c:totalDe(q),cc:q.cc||"PROD"}],{col:"cotizaciones",id:q.id},{cot:q.id});
-    const antes=store.ingresos.filter(i=>i.cotId===q.id&&ING_VENTA.includes(i.tipo)&&String(i.f)<f).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
+    const antes=store.ingresos.filter(i=>i.cotId===q.id&&i.cobrado!==false&&ING_VENTA.includes(i.tipo)&&String(i.f)<f).reduce((s,i)=>s+(+i.valor||0)+(+i.rete||0)+(+i.reteica||0),0);
     const tope=vd?store.ventas.filter(x=>x.cotId===q.id&&x.estado==="contabilizada").reduce((s,x)=>s+(window.FPRO?FPRO.calcVenta(x).neto:0),0):totalDe(q),cruza=Math.min(antes,Math.max(0,tope));
     if(cruza)add("AA",f,"Cruce de anticipos con la venta · "+q.numero,q.cliente?.nombre,[{cta:mapa("ing.anticipo"),d:cruza},{cta:mapa("cxc"),c:cruza}],{col:"cruce",id:q.id},{cot:q.id})}
   const ingTx={};for(const i of store.ingresos)if(i.tx&&!i.causado&&i.cobrado!==false)(ingTx[i.tx] ||= []).push(i);
@@ -6466,10 +6476,11 @@ function hojasContabilidad(){
   const ter=[["Nombre","Tipo de documento","Documento","DV","Tipo","Teléfono","Correo","Dirección","Ciudad"],...tercerosTodos().map(t=>[t.nombre,t.doc?t.tipoDoc||"CC":"",t.doc||"",t.dv||"",[...t.tipos].join(", "),t.tel||"",t.email||"",t.dir||"",t.ciudad||""])];
   return [{nombre:"Libro diario",filas:diario,anchos:[11,12,24,40,26,10,40,15,15],filtroHasta:diario.length},{nombre:"Balance de prueba",filas:prueba,anchos:[10,44,16,16,16,16]},{nombre:"Estado de resultados",filas:er,anchos:[10,44,18,18]},{nombre:"Balance general",filas:bg,anchos:[10,44,18]},{nombre:"Terceros",filas:ter,anchos:[34,10,16,5,24,16,26,30,16]},{nombre:"Inventario (kárdex)",filas:[["Material","Unidad","Cantidad","Costo promedio","Valor"],...kardexTodos().map(k=>[k.info.nombre,k.info.unidad,{v:+k.q.toFixed(3),s:S.num},M(k.prom),M(k.v)])],anchos:[44,10,12,16,16]}];
 }
-async function guardarCont(msg){if(modo==="compartido"){try{await db.doc("config/contable").set(clone(CONT));if(msg)toast(msg)}catch(err){
+async function guardarCont(msg){if(modo==="compartido"){try{const remoto=await db.doc("config/contable").set(clone(CONT));if(remoto)CONT={...clone(CONT_DEF),...remoto};if(msg)toast(msg)}catch(err){
     // sin internet: lo de fondo (numeración, reglas aprendidas) se vuelve a intentar solo; solo se avisa si fue una acción de la persona
     if(err?.code==="offline"){if(msg)toast(err.msg||"Sin internet: este cambio necesita conexión.");return}
-    toast(err?.msg||"No se pudo guardar ("+(err.code||"error")+")");
+    // otra sesión cambió la configuración: si era algo de fondo (la numeración), se vuelve a leer sin molestar; se reintenta solo
+    if(!(err?.code==="conflict"&&!msg))toast(err?.msg||"No se pudo guardar ("+(err.code||"error")+")");
     // si el servidor no lo aceptó, la pantalla no debe quedarse mostrando un cambio que no existe: se vuelve a leer lo guardado
     try{const s=await db.doc("config/contable").get();CONT=s.exists?{...clone(CONT_DEF),...s.data()}:clone(CONT_DEF);render()}catch{}}}else if(msg)toast(msg)}
 // candado de meses cerrados: no se crean, cambian ni borran movimientos con fecha en un mes cerrado (salvo registrar el pago de algo a crédito)
@@ -6757,7 +6768,8 @@ async function importarExcelDian(file){
   }
   return {nuevas,rep,omit,sinRegla:prov.size};
 }
-async function causarCompra(c,forma,cuenta,dias){
+async function causarCompra(c,forma,cuenta,dias){return atomico(()=>causarCompraDentro(c,forma,cuenta,dias))}
+async function causarCompraDentro(c,forma,cuenta,dias){
   const d=destDe(c);if(!d)throw new Error("Falta indicar para qué es");
   const venc=forma==="pagada"?"":(c.venc||sumaDias(c.fecha,+dias||0));
   if(venc&&!c.venc)await guardarDoc("compras",c.id,{...c,venc});
@@ -6809,10 +6821,15 @@ document.addEventListener("click",async e=>{
       case "imprimir":{const el=document.querySelector(".fac-doc");if(!el)return;const w=window.open("","_blank");if(!w){toast("Permite las ventanas emergentes para imprimir");return}
         w.document.write(`<!doctype html><meta charset="utf-8"><title>Factura de compra</title><style>body{font:13px system-ui,sans-serif;margin:24px;color:#1f2326}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #ddd;padding:6px;text-align:left}.r{text-align:right}button,select,input,.fm-x,.row:last-child{display:none!important}.fac-cinta{display:inline-block;color:#fff;padding:2px 10px;border-radius:4px;font-weight:700}.fac-info{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}.fac-info span{display:block;color:#666;font-size:11px}.who{color:#666;font-size:11.5px}</style>${el.innerHTML}<script>print()<\/script>`);w.document.close();break}
       case "pagar":{const c=store.compras.find(x=>x.id===d.id),eg=c&&egDeC(c);if(!eg)return;if(store.cuentas.length&&!facPago.cuenta){toast("Elige de qué cuenta se pagó");return}
-        {const sal=saldoCxpEg(eg),val=Math.round(+String(facPago.valor||"").replace(/\D/g,"")||sal);if(!(val>0)){toast("Escribe el valor del pago");return}if(val>sal){if(!confirm("El valor es mayor que el saldo. El exceso ("+cop(val-sal)+") quedará como anticipo a este proveedor. ¿Seguir?"))return;await guardarDoc("egresos",null,{f:facPago.f||hoyISO(),cat:"anticipoProv",tipo:"variable",concepto:"Pago en exceso · "+(eg.nota||eg.concepto),valor:val-sal,tercero:eg.tercero,pagado:true,cuenta:facPago.cuenta||"",fPago:facPago.f||hoyISO(),fPagoReg:new Date().toISOString(),creado:new Date().toISOString(),por:myId||null})}
-          if(val<sal){const y0=(eg.tx?store.egresos.filter(z=>z.tx===eg.tx):[eg])[0];await guardarDoc("egresos",y0.id,{...y0,abonos:[...(y0.abonos||[]),{id:uid4(),f:facPago.f||hoyISO(),valor:val,cuenta:facPago.cuenta||"",reg:new Date().toISOString()}]});facPago.valor="";toast("Abono registrado. Saldo: "+cop(sal-val));render();break}}
-        for(const y of (eg.tx?store.egresos.filter(z=>z.tx===eg.tx):[eg]).filter(z=>z.pagado===false))await guardarDoc("egresos",y.id,{...y,pagado:true,cuenta:facPago.cuenta||"",fPago:facPago.f||hoyISO(),fPagoReg:new Date().toISOString()});
-        toast("Pago registrado");render();break}
+        const sal=saldoCxpEg(eg),val=Math.round(+String(facPago.valor||"").replace(/\D/g,"")||sal);
+        if(!(val>0)){toast("Escribe el valor del pago");return}
+        if(val>sal&&!confirm("El exceso ("+cop(val-sal)+") quedará como anticipo al proveedor. ¿Seguir?"))return;
+        await atomico(async()=>{
+          if(val>sal)await guardarDoc("egresos",null,{f:facPago.f||hoyISO(),cat:"anticipoProv",tipo:"variable",concepto:"Pago en exceso · "+(eg.nota||eg.concepto),valor:val-sal,tercero:eg.tercero,pagado:true,cuenta:facPago.cuenta||"",fPago:facPago.f||hoyISO(),fPagoReg:new Date().toISOString(),creado:new Date().toISOString(),por:myId||null});
+          if(val<sal){const y0=(eg.tx?store.egresos.filter(z=>z.tx===eg.tx):[eg])[0];await guardarDoc("egresos",y0.id,{...y0,abonos:[...(y0.abonos||[]),{id:uid4(),f:facPago.f||hoyISO(),valor:val,cuenta:facPago.cuenta||"",reg:new Date().toISOString()}]});return}
+          for(const y of (eg.tx?store.egresos.filter(z=>z.tx===eg.tx):[eg]).filter(z=>z.pagado===false))await guardarDoc("egresos",y.id,{...y,pagado:true,cuenta:facPago.cuenta||"",fPago:facPago.f||hoyISO(),fPagoReg:new Date().toISOString()});
+        });
+        facPago.valor="";toast(val<sal?"Abono registrado. Saldo: "+cop(sal-val):"Pago registrado");render();break}
       case "masiva":if(!facSel.size)return;facMas={forma:"credito",dias:30,cuenta:cuentasActivas()[0]?.id||"",ids:[...facSel]};finModal="facmas";render();break;
       case "causar":{const L=[...facSel].map(id=>store.compras.find(c=>c.id===id)).filter(c=>c&&destDe(c));if(facMas.forma==="pagada"&&store.cuentas.length&&!facMas.cuenta){toast("Elige la cuenta");return}
         Object.assign(facMas,{hechas:0,total:L.length,ok:0,err:0});render();
@@ -6829,7 +6846,8 @@ document.addEventListener("click",async e=>{
 });
 
 // compras de la adecuación del local: no entran a bodega; van a la inversión (activo) o como aporte del socio que las pagó
-async function guardarFacturaLocal(){
+async function guardarFacturaLocal(){return atomico(guardarFacturaLocalDentro)}
+async function guardarFacturaLocalDentro(){
   const d=ingDraft,desc=l=>String(l.nombre||(l.mat&&l.mat!=="otro"?matInfo(l.mat).nombre:"")).trim();
   const lineas=d.lineas.filter(l=>desc(l)&&+l.cant>0);
   if(!lineas.length)throw {msg:"Escribe al menos una línea con descripción y cantidad"};
@@ -7057,12 +7075,12 @@ document.addEventListener("click",async e=>{
         const EXT=(!causa?(D.extra||[]):[]).filter(x=>+x.valor>0);if((D.extra||[]).some(x=>String(x.valor||"").trim()&&!(+x.valor>0))){toast("Revisa el valor de los otros ingresos");return}
         if(EXT.some(x=>tipoIng(x.tipo)[5]&&!x.cotId&&["anticipo","saldo"].includes(x.tipo))){toast("Elige la obra de cada anticipo o saldo");return}
         const TXI=old?(old.tx||(EXT.length?"tx"+uid4()+uid4():"")):(EXT.length?"tx"+uid4()+uid4():"");
-        await guardarDoc("ingresos",old?old.id:null,{...(old||{}),tx:TXI,rete:0,reteica:0,f:D.f,tipo:D.tipo,cuenta:causa?"":D.cuenta,cobrado:!causa,causado:causa||!!yaCob,fCobro:yaCob?old.fCobro:"",venc:causa?D.venc||"":"",cc:D.cc||"",valor:v,cotId:t[5]?D.cotId:"",cliente:q?.cliente?.nombre||D.cliente.trim(),...(t[4]&&(+D.rete||+D.reteica)?{rete:+D.rete||0,reteica:+D.reteica||0}:{}),concepto:D.concepto.trim()||t[1]+(q?" · "+q.numero:""),nota:D.nota.trim(),puc:t[2],creado:old?.creado||new Date().toISOString(),por:old?old.por??null:(myId||null),...(old?{editado:new Date().toISOString(),editadoPor:myId||null}:{})});
+        await atomico(async()=>{await guardarDoc("ingresos",old?old.id:null,{...(old||{}),tx:TXI,rete:0,reteica:0,f:D.f,tipo:D.tipo,cuenta:causa?"":D.cuenta,cobrado:!causa,causado:causa||!!yaCob,fCobro:yaCob?old.fCobro:"",venc:causa?D.venc||"":"",cc:D.cc||"",valor:v,cotId:t[5]?D.cotId:"",cliente:q?.cliente?.nombre||D.cliente.trim(),...(t[4]&&(+D.rete||+D.reteica)?{rete:+D.rete||0,reteica:+D.reteica||0}:{}),concepto:D.concepto.trim()||t[1]+(q?" · "+q.numero:""),nota:D.nota.trim(),puc:t[2],creado:old?.creado||new Date().toISOString(),por:old?old.por??null:(myId||null),...(old?{editado:new Date().toISOString(),editadoPor:myId||null}:{})});
         for(const x of EXT){const tx2=tipoIng(x.tipo),q2=quotes.find(y=>y.id===x.cotId),y0=x.id?store.ingresos.find(y=>y.id===x.id):null;
           if(y0){await guardarDoc("ingresos",y0.id,{...y0,tx:TXI,f:D.f,cuenta:D.cuenta,tipo:x.tipo,valor:+x.valor,cotId:tx2[5]?x.cotId||"":"",cliente:q2?.cliente?.nombre||y0.cliente||D.cliente.trim(),concepto:String(x.concepto||"").trim()||tx2[1]+(q2?" · "+q2.numero:""),nota:D.nota.trim(),editado:new Date().toISOString()});continue}
           await guardarDoc("ingresos",null,{tx:TXI,rete:0,reteica:0,f:D.f,tipo:x.tipo,cuenta:D.cuenta,cobrado:true,causado:false,fCobro:"",venc:"",cc:"",valor:+x.valor,cotId:tx2[5]?x.cotId||"":"",cliente:q2?.cliente?.nombre||D.cliente.trim(),concepto:String(x.concepto||"").trim()||tx2[1]+(q2?" · "+q2.numero:""),nota:D.nota.trim(),puc:tx2[2],creado:new Date().toISOString(),por:myId||null})}
         for(const id of [...(D.quitados||[]),...(D.extra||[]).filter(x=>x.id&&!(+x.valor>0)).map(x=>x.id)])if(store.ingresos.some(y=>y.id===id))await borrarDoc("ingresos",id);
-        if(old?.tx&&(old.f!==D.f||old.cuenta!==D.cuenta))for(const y of store.ingresos.filter(y=>y.tx===old.tx&&y.id!==old.id&&!(D.extra||[]).some(x=>x.id===y.id)))await guardarDoc("ingresos",y.id,{...y,f:D.f,cuenta:D.cuenta});
+        if(old?.tx&&(old.f!==D.f||old.cuenta!==D.cuenta))for(const y of store.ingresos.filter(y=>y.tx===old.tx&&y.id!==old.id&&!(D.extra||[]).some(x=>x.id===y.id)))await guardarDoc("ingresos",y.id,{...y,f:D.f,cuenta:D.cuenta});});
         finIngMes=D.f.slice(0,7);finIng=finIngNuevo({f:D.f,cuenta:D.cuenta});finModal=null;toast(old?"Ingreso actualizado":EXT.length?`Recibo de caja registrado (${EXT.length+1} conceptos)`:"Ingreso registrado");render();return}
       case "editar":{let x=store.ingresos.find(y=>y.id===d.id);if(!x)return;const G=x.tx?store.ingresos.filter(y=>y.tx===x.tx):[x];if(G.length>1)x=G[0];finIng={...finIngNuevo(),...x,cobrado:x.cobrado===false?"no":"si",cc:x.cc||"",venc:x.venc||"",valor:String(x.valor??""),rete:x.rete?String(x.rete):"",reteica:x.reteica?String(x.reteica):"",cliente:x.cliente||"",concepto:x.concepto||"",nota:x.nota||"",editId:x.id,extra:G.length>1?G.slice(1).map(y=>({id:y.id,tipo:y.tipo,cotId:y.cotId||"",concepto:y.concepto||"",valor:String(y.valor??"")})):[],quitados:[]};finModal="ingreso";render();setTimeout(()=>$("#ing-valor")?.focus(),40);return}
       case "cobrar":{const x=store.ingresos.find(y=>y.id===d.id);if(!x)return;const sel=document.querySelector(`[data-ing-cobrar-cta="${x.id}"]`);
@@ -8026,7 +8044,7 @@ document.addEventListener("click",async e=>{
       if(!draft.cliente.nombre.trim()){toast("Escribe el nombre del cliente");$("#c-nombre")?.focus();return}
       {const sp=sinPrecio(draft.items);if(sp.length&&!draft.avisoPrecio){draft.avisoPrecio=true;toast(`Ojo: ${sp.length} material${sp.length>1?"es":""} sin precio cuenta${sp.length>1?"n":""} en $0 (${sp.slice(0,3).join(", ")}). Pulsa Guardar otra vez para guardar así.`);return}delete draft.avisoPrecio}
       b.disabled=true;
-      try{const id=await guardarCotizacion(clone(draft));toast(`Cotización ${draft.numero} guardada`);draft=nuevoDraft();cur=nuevoItem();editIdx=-1;guardarDraftLocal();detalleId=id;detalleTab="doc";vista="detalle";render()}
+      try{const id=await guardarCotizacion(clone(draft));toast(`Cotización ${draft.numero} guardada`);draft=nuevoDraft();cur=nuevoItem();editIdx=-1;guardarDraftLocal();detalleId=id;detalleTab="doc";vista="detalle";render();if(quotes.find(q=>q.id===id)?.estado==="aprobada"&&window.COTFIN)setTimeout(()=>COTFIN.abrir(id),0)}
       catch(err){b.disabled=false;toast(err.code==="invalid_argument"?"No tienes permiso para guardar. Pide acceso de colaborador.":"No se pudo guardar ("+(err.code||"error")+")")}
       break}
     case "editar":{const q=quotes.find(x=>x.id===detalleId);if(q){draft=clone(q);draft.cliente ||= {nombre:"",telefono:"",direccion:""};cur=draft.items[0]?clone(draft.items[0]):nuevoItem();cur=nuevoItem(cur.producto);editIdx=-1;
@@ -8113,3 +8131,4 @@ iniciar();
 <script src="finanzas-pro.js"></script>
 <script src="finanzas-pro2.js"></script>
 <script src="finanzas-pro3.js"></script>
+<script src="finanzas-pro4.js"></script>

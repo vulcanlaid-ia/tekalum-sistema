@@ -13,7 +13,7 @@ const stmt = (sql, args = []) => ({
   first: async () => sq.prepare(sql.replace(/\?(\d+)/g, "?")).get(...ord(sql, args)) ?? null,
   all: async () => ({ results: sq.prepare(sql.replace(/\?(\d+)/g, "?")).all(...ord(sql, args)) }),
 });
-const DB = { prepare: (sql) => stmt(sql), batch: async (L) => { for (const s of L) await s.run(); } };
+const DB = { prepare: (sql) => stmt(sql), batch: async (L) => { sq.exec("BEGIN"); try { const out = []; for (const s of L) out.push(await s.run()); sq.exec("COMMIT"); return out; } catch (e) { sq.exec("ROLLBACK"); throw e; } } };
 const CUENTAS = {
   jefe: { clave: "j", rol: "admin" }, osw: { clave: "o", rol: "contador", nombre: "Oswaldo" },
   car: { clave: "c", rol: "auxiliar", nombre: "Carolina" }, cris: { clave: "x", rol: "usuario", nombre: "Cristian" },
@@ -80,7 +80,7 @@ esperar("contador: crear una cuenta bancaria", await PUT("osw", "cuentas", "cu1"
 esperar("contador: registrar un empleado con salario", await PUT("osw", "personal", "p2", { nombre: "Dora", salario: 2000000 }), "ok");
 esperar("contador: cerrar un mes", await PUT("osw", "config", "contable", { ...leer("config", "contable"), cierres: { "2026-09": { f: "x" }, "2026-10": { f: "2026-10-31" } } }), "ok");
 esperar("contador: reabrir un mes", await PUT("osw", "config", "contable", { ...leer("config", "contable"), cierres: { "2026-09": { f: "x" } } }), "ok");
-esperar("contador: cambiar el mapa de cuentas", await PUT("osw", "config", "contable", { ...leer("config", "contable"), mapa: { x: "1" } }), "ok");
+esperar("contador: no cambiar reglas con meses cerrados", await PUT("osw", "config", "contable", { ...leer("config", "contable"), mapa: { x: "1" } }), "no");
 esperar("contador: cerrar una conciliación", await PUT("osw", "config", "contable", { ...leer("config", "contable"), conc: { ...leer("config", "contable").conc, "b1|2026-11": { ok: {}, cerrada: { f: "x", por: "O" } } } }), "ok");
 esperar("contador: cambiar costos del taller (precios)", await PUT("osw", "config", "precios", { operacion: { a: 1 } }), "ok");
 esperar("contador: movimiento de bodega (devolución a proveedor)", await PUT("osw", "bodega", "b-osw", { cantidad: 1, mov: [] }), "ok");
@@ -113,7 +113,7 @@ esperar("auxiliar: el sistema guarda su numeración", await PUT("car", "config",
 esperar("auxiliar: el sistema aprende la regla del proveedor", await PUT("car", "config", "contable", { ...leer("config", "contable"), reglasProv: { p: { destino: "bodega" } } }), "ok");
 esperar("auxiliar: registrar en lote movimientos del banco (nuevos)", await PUT("car", "egresos", "e-banco", { f: "2026-11-12", cat: "bancarios", valor: 4000, tercero: "Banco", pagado: true, cuenta: "c1", fPago: "2026-11-12" }), "ok");
 esperar("auxiliar: subir la foto de una factura", await PUT("car", "archivos", "ar1", { tipo: "factura" }), "ok");
-esperar("auxiliar: crear la ficha de un equipo", await PUT("car", "maquinaria", "maq-nuevo", { nombre: "Equipo", contab: "compra", valor: 100 }), "ok");
+esperar("auxiliar: crear la ficha de un equipo", await PUT("car", "maquinaria", "maq-nuevo", { nombre: "Equipo", contab: "compra", valor: 100, fAdq: "2026-11-10" }), "ok");
 // lo que NO hace (para que no tergiverse ni "cuadre" números)
 esperar("auxiliar NO cambia el valor de un ingreso ya guardado", await PUT("car", "ingresos", "ing-pagado", { f: "2026-11-02", tipo: "contado", valor: 8, cliente: "Ana", cobrado: true, cuenta: "c1" }), "no");
 esperar("auxiliar NO borra un ingreso", await DEL("car", "ingresos", "ing-pagado"), "no");
@@ -161,7 +161,8 @@ esperar("Cristian: registra una herramienta (sin contabilidad)", await PUT("cris
 esperar("Cristian: cambia la foto de un equipo contabilizado", await PATCH("cris", "maquinaria", "maq-contab", { foto: "f1" }), "ok");
 esperar("Cristian NO registra un ingreso que no es chatarra", await PUT("cris", "ingresos", "i-no", { f: "2026-11-10", tipo: "contado", valor: 1, cliente: "X", cobrado: true }), "no");
 esperar("Cristian NO registra un egreso suelto", await PUT("cris", "egresos", "e-no", { f: "2026-11-10", cat: "servicios", valor: 1, tercero: "T", pagado: true }), "no");
-esperar("Cristian NO cambia un egreso", await PATCH("cris", "egresos", "eg-credito", { pagado: true }), "no");
+esperar("Cristian NO cambia un egreso", await PATCH("cris", "egresos", "eg-credito", { pagado: true, cuenta: "otra" }), "no");
+esperar("Cristian NO lee una nómina mandando un cambio vacío", { s: (await PATCH("cris", "nominas", "n1", {})).b?.data?.tipo === undefined ? 200 : 0, b: 0 }, "ok");
 esperar("Cristian NO borra un ingreso", await DEL("cris", "ingresos", "ing-pagado"), "no");
 esperar("Cristian NO hace ventas", await PUT("cris", "ventas", "v-c", { f: "2026-11-10", estado: "borrador" }), "no");
 esperar("Cristian NO hace asientos", await PUT("cris", "asientos", "a-c", { f: "2026-11-10", estado: "borrador" }), "no");
@@ -227,4 +228,5 @@ esperar("admin: ve todo", { s: Object.keys((await pedir("jefe", "GET", "/api/all
 }
 
 console.log(`OK: ${ok}   FALLOS: ${fallos.length}`);
+if (fallos.length) process.exitCode = 1; // que npm test se detenga si algo falla
 for (const f of fallos) console.log("  ✗", f);

@@ -86,12 +86,10 @@ puede verificar y corregir cada uno.
 - Varios porcentajes de ley (ARL, exoneración de parafiscales, tarifas de
   ReteICA por ciudad) están con valores de referencia 2026 y pendientes de
   confirmar con el contador.
-- Numeración de comprobantes y operaciones con varios documentos (por ejemplo,
-  causar una factura de compra en varios gastos) no son atómicas: si la
-  conexión se cae a la mitad, puede quedar una operación a medio registrar, o
-  dos usuarios conectados al mismo tiempo podrían calcular el mismo número de
-  comprobante. Con el tamaño actual del equipo (2 a 4 personas) el riesgo es
-  bajo, pero no está resuelto a nivel de diseño.
+- La numeración de documentos contabilizados se asigna ahora en el servidor.
+  Las operaciones financieras agrupadas adaptadas usan `/api/lote`, con transacción
+  D1, bitácora e idempotencia. Ver alcance y límites en
+  [CORRECCIONES-INTEGRIDAD.md](CORRECCIONES-INTEGRIDAD.md).
 - Permisos por rol: ya están definidos y aplicados en el servidor (ver
   [ROLES.md](ROLES.md)): contador, auxiliar contable, gestión del taller y
   gerencia. Lo que queda por decidir es el detalle fino de cada caso a medida
@@ -152,7 +150,10 @@ hoy (193 KB comprimidos × 240). Ahora: menos de 0,2 MB por hora sin cambios.
   un registro que aún no ha subido se funde con él (no es "editar lo ya guardado").
 - Al subir, el servidor aplica sus reglas de siempre (permisos del rol, meses
   cerrados). Lo que rechaza **no se pierde**: queda en un panel con el motivo para
-  decidir. Un reenvío idéntico de algo ya guardado no cuenta como edición.
+  decidir. Cada operación viaja como un lote con su clave: al reenviarlo, el servidor
+  devuelve el resultado guardado y no lo duplica. Si otra persona cambió el documento
+  mientras tanto (409), también queda en el panel. Una operación agrupada (causar una
+  factura, un recibo de varias facturas) se sube completa o nada.
 - Los cambios de configuración (cierres, mapa de cuentas, precios) y los enlaces
   para clientes necesitan internet.
 - Los números de comprobante definitivos se asignan al sincronizar.
@@ -162,10 +163,21 @@ Pruebas: `cloudflare/prueba-sinconexion.mjs` (Chrome + el manejador real de la A
 
 **Internet lenta.** El sistema abre al instante con lo guardado en el equipo: la página
 (service worker, `cloudflare/app/sw.js`: se muestra la copia y se revisa en segundo plano
-con ETag; si hay una versión nueva avisa con un botón "Actualizar"), la última copia de los
+comparando el contenido, como máximo cada 10 minutos (Cloudflare Pages no envía ETag); si hay una versión nueva avisa con un botón "Actualizar"), la última copia de los
 datos (se pone al día con la consulta de cambios) y el rol de la persona. Ninguna llamada
 queda esperando para siempre: si una conexión se atasca, se trata como "sin internet" y lo
 registrado queda en la cola. En el primer arranque de un equipo nuevo se ve un aviso
 "Cargando TEKALUM…" en vez de una pantalla en blanco. La prueba
 `prueba-sinconexion.mjs` simula una página de 7 s y datos de 9 s y comprueba que abre en
 menos de 4 s.
+
+## Segunda revisión de integridad
+
+Correcciones y pruebas reproducibles: [CORRECCIONES-INTEGRIDAD.md](CORRECCIONES-INTEGRIDAD.md).
+Ejecuta `npm test` dentro de `cloudflare` (construye y corre las tres pruebas del servidor).
+
+## Cotizaciones aprobadas y abonos
+
+El flujo de conversión, los permisos y la separación de facturado/cobrado/pendiente
+se describen en [FLUJO-COTIZACION-FINANZAS.md](FLUJO-COTIZACION-FINANZAS.md).
+Se agregan 20 pruebas de conversión al comando `npm test`.

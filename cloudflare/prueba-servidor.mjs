@@ -13,7 +13,7 @@ const stmt = (sql, args = []) => ({
 });
 // ?1 ?2 numerados: se convierten a posicionales en el orden en que aparecen
 const ord = (sql, a) => [...sql.matchAll(/\?(\d+)/g)].map((m) => { const v = a[+m[1] - 1]; return v === undefined ? null : v; });
-const DB = { prepare: (sql) => stmt(sql), batch: async (L) => { for (const s of L) await s.run(); } };
+const DB = { prepare: (sql) => stmt(sql), batch: async (L) => { sq.exec("BEGIN"); try { const out = []; for (const s of L) out.push(await s.run()); sq.exec("COMMIT"); return out; } catch (e) { sq.exec("ROLLBACK"); throw e; } } };
 const env = { DB, CUENTAS: JSON.stringify({ admin1: { clave: "a", rol: "admin" }, contador1: { clave: "o", rol: "contador", nombre: "Oswaldo" }, usuario1: { clave: "u", rol: "usuario" } }), CUENTAS_EXTRA: JSON.stringify({ usuario1: { baja: true } }) };
 const { onRequest } = await import("./functions/api/[[path]].js");
 const pedir = async (u, c, metodo, ruta, body) => {

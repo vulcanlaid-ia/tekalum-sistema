@@ -18,15 +18,18 @@
 
   /* ===================== Estado de los datos =====================
      base  = lo que dice el servidor (la última copia que se pudo bajar)
-     cola  = lo registrado sin internet que aún no sube
-     cache = base + cola (es lo que ve la pantalla) */
+     cola  = lotes registrados sin internet que aún no suben (cada uno se sube completo o nada, con su misma clave)
+     cache = base + cola (+ lo que se está preparando dentro de una operación agrupada): es lo que ve la pantalla */
   let base=null,cache=null,ver=null,confirmados=new Set(),cargando=null,fallos=0;
-  let cola=[],sinInternet=false,ultimoOk=0,vaciando=false,desdeCopia=0;
-  const listo=Promise.race([(async()=>{try{cola=(await IDB.cola()).filter(e=>e&&e.metodo)}catch{cola=[]}pintarEstado()})(),new Promise(r=>setTimeout(r,3000))]);
+  let cola=[],sinInternet=false,ultimoOk=0,vaciando=false,desdeCopia=0,enviandoAhora=null;
+  let transaccion=null,colaEscrituras=Promise.resolve();   // operación agrupada en preparación y orden de las escrituras
+  const listo=Promise.race([(async()=>{try{cola=(await IDB.cola()).filter(e=>e&&(e.metodo||e.lote))}catch{cola=[]}pintarEstado()})(),new Promise(r=>setTimeout(r,3000))]);
   const pendientes=()=>cola.filter(e=>e.usuario===USR()&&e.estado==="pendiente");
   const fallidos=()=>cola.filter(e=>e.usuario===USR()&&e.estado==="fallido");
+  const copia=(x)=>x===undefined?undefined:JSON.parse(JSON.stringify(x));
+  const nuevaClave=()=>(crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)).replace(/[^A-Za-z0-9_-]/g,"");
 
-  // llamada a la API; si no hay internet, el error trae code "offline"
+  // llamada a la API; si no hay internet (o la conexión se atasca), el error trae code "offline"
   const sinRed=()=>{const e=new Error("sin conexión");e.code="offline";return e};
   async function llamar(ruta,opts={},ms=25000){
     const ac=new AbortController(),t=setTimeout(()=>ac.abort(),ms);
@@ -39,9 +42,9 @@
     try{
       if(r.status===401){pedirAcceso(LS.get("vye-clave")?"Usuario o contraseña incorrectos.":"");const e=new Error("clave");e.code="not_granted";throw e}
       if(!r.ok){
-        // 403 = el rol no tiene permiso: el servidor explica por qué y la pantalla lo muestra tal cual
-        let msg="";if(r.status===403){try{msg=(await r.json()).error||""}catch{}}
-        const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":r.status===403?"permission_denied":"unavailable";if(msg)e.msg=msg;throw e}
+        // 400/403/409: el servidor explica por qué (permiso, mes cerrado, otra sesión cambió el documento) y la pantalla lo muestra tal cual
+        let msg="";if([400,403,409].includes(r.status)){try{msg=(await r.json()).error||""}catch{}}
+        const e=new Error("api "+r.status);e.code=r.status===400?"invalid_argument":r.status===403?"permission_denied":r.status===409?"conflict":"unavailable";if(msg)e.msg=msg;throw e}
       let j;try{j=await r.json()}catch{throw sinRed()}   // la conexión se cortó a mitad de la descarga
       return conCab?{json:j,ver:r.headers.get("x-ver")}:j;
     }finally{r.fin()}
@@ -49,31 +52,41 @@
   function entregar(s){
     if(!cache)return;
     const filas=cache[s.col]||[];
-    if(s.tipo==="doc"){const d=filas.find(x=>x.id===s.id);s.cb({id:s.id,exists:!!d,data:()=>d?d.data:undefined,metadata:{fromCache:false,hasPendingWrites:false}});return}
+    if(s.tipo==="doc"){const d=filas.find(x=>x.id===s.id);s.cb({id:s.id,exists:!!d,data:()=>d?copia(d.data):undefined,metadata:{fromCache:false,hasPendingWrites:false}});return}
     const docs=filas.map(x=>({id:x.id,exists:true,data:()=>x.data,metadata:{fromCache:false,hasPendingWrites:false}}));
     if(s.orden){const [f,dir]=s.orden,m=dir==="desc"?-1:1;docs.sort((a,b)=>{const va=a.data()[f],vb=b.data()[f];return va===vb?0:va==null?1:vb==null?-1:(va<vb?-1:1)*m})}
     s.cb({docs,size:docs.length,empty:!docs.length,docChanges:()=>[],metadata:{fromCache:false,hasPendingWrites:false}});
   }
   const notificar=()=>subs.forEach(entregar);
 
-  // aplica una operación sobre un conjunto de datos (se usa para la cola y para lo que el servidor ya aceptó)
-  function aplicarOp(c,e){
-    const f=(c[e.col] ||= []),i=f.findIndex(x=>x.id===e.id);
-    if(e.metodo==="DELETE"){if(i>=0)f.splice(i,1)}
-    else if(e.metodo==="PUT"){if(i>=0)f[i]={id:e.id,data:e.body};else f.push({id:e.id,data:e.body})}
-    else if(e.metodo==="PATCH"){if(i>=0)f[i]={id:e.id,data:{...f[i].data,...e.body}}}
+  // ---- operaciones: un lote es {clave, operaciones:[{col,id,data(null = borrar),previo?}]} ----
+  // (las entradas antiguas de la cola, de antes del lote, tienen metodo PUT/PATCH/DELETE y se siguen subiendo igual)
+  const opsDe=e=>e.lote?e.lote.operaciones:[{col:e.col,id:e.id,data:e.metodo==="DELETE"?null:e.body,parche:e.metodo==="PATCH"}];
+  function ponerDoc(c,col,id,data,parche){
+    const f=(c[col] ||= []),i=f.findIndex(x=>x.id===id);
+    if(data===null){if(i>=0)f.splice(i,1);return}
+    const d=parche&&i>=0?{...f[i].data,...data}:data;
+    if(i>=0)f[i]={id,data:d};else if(!parche)f.push({id,data:d});
   }
   function reconstruir(){
     if(!base)return;
     const c={};for(const [k,v] of Object.entries(base))c[k]=v.slice();
-    for(const e of pendientes())aplicarOp(c,e);
+    for(const e of pendientes())for(const o of opsDe(e))ponerDoc(c,o.col,o.id,o.data,o.parche);
+    if(transaccion)for(const o of transaccion.operaciones.values())ponerDoc(c,o.col,o.id,o.data);
     cache=c;
   }
   // lo que el servidor acaba de aceptar queda en la copia del servidor y en pantalla al instante
-  function confirmar(e){
-    base ||= {};aplicarOp(base,e);
-    const k=e.col+"|"+e.id;if(e.metodo==="DELETE")confirmados.delete(k);else confirmados.add(k);
+  function confirmarDocs(docs){
+    base ||= {};
+    for(const d of docs||[]){ponerDoc(base,d.col,d.id,d.data===null?null:copia(d.data));const k=d.col+"|"+d.id;if(d.data===null)confirmados.delete(k);else confirmados.add(k)}
     reconstruir();notificar();guardarCopia();
+  }
+  // "previo" (la versión que se leyó) solo se manda si ese documento no tiene cambios esperando subir;
+  // así el servidor detecta que otra persona lo cambió, sin confundir con cambios propios aún no subidos
+  function conPrevio(col,id){
+    if(!base)return {};   // aún no hay datos cargados: no se inventa una versión vacía (daría un conflicto falso)
+    if(pendientes().some(e=>opsDe(e).some(o=>o.col===col&&o.id===id)))return {};
+    return {previo:copia((base?.[col]||[]).find(x=>x.id===id)?.data||null)};
   }
 
   // ---- bajar los cambios: primero se pregunta si algo cambió (unos pocos bytes) y solo entonces se baja lo nuevo ----
@@ -112,6 +125,7 @@
     tCopia=setTimeout(()=>{if(!base)return;const b={};for(const [c,L] of Object.entries(base))if(c!=="archivos_img")b[c]=L;IDB.set("snap:"+USR(),{base:b,ver,t:Date.now()}).catch(()=>{})},1500);
   }
   function refrescar(){
+    if(transaccion)return Promise.resolve();   // mientras se prepara una operación agrupada no se cambian los datos de debajo
     if(cargando)return cargando;
     cargando=(async()=>{
       try{
@@ -133,66 +147,116 @@
     return cargando;
   }
 
-  // ---- subir lo registrado sin internet, en el mismo orden ----
+  // ---- subir lo registrado sin internet, en el mismo orden y con la misma clave (el servidor no lo duplica) ----
   const quitar=async e=>{cola=cola.filter(x=>x!==e);try{await IDB.del(e.n)}catch{}};
   async function vaciar(){
     if(vaciando||!pendientes().length)return;
     vaciando=true;pintarEstado();
     const correr=async()=>{
       for(const e of pendientes()){
-        let r;try{r=await llamar(e.ruta,{method:e.metodo,body:e.body===undefined?undefined:JSON.stringify(e.body)},40000)}catch{fueraDeLinea();return}
+        if(!e.intentado){e.intentado=true;try{await IDB.put(e)}catch{}}   // pudo haber llegado al servidor: si se le funde algo, cambia de clave
+        let r;enviandoAhora=e;
+        try{r=e.lote?await llamar("/lote",{method:"POST",body:JSON.stringify(e.lote)},40000)
+                    :await llamar(e.ruta,{method:e.metodo,body:e.body===undefined?undefined:JSON.stringify(e.body),headers:undefined},40000)}
+        catch{fueraDeLinea();return}
+        finally{enviandoAhora=null}
         r.fin();
         if(r.status===401){pedirAcceso("Vuelve a entrar para subir lo que registraste sin internet.");return}
-        if(r.ok||r.status===409){await quitar(e);continue}              // 409: ya estaba guardado
+        if(r.ok){let j=null;try{j=await r.json()}catch{}await quitar(e);if(j?.documentos)confirmarDocs(j.documentos);else if(j?.data)confirmarDocs([{col:e.col,id:e.id,data:e.metodo==="DELETE"?null:j.data}]);continue}
         if(r.status>=500||r.status===429)return;                          // el servidor no pudo ahora: se intenta luego
+        // 400/403/409: el servidor lo rechazó (permiso, mes cerrado, otra persona cambió el documento): no se pierde, se muestra para decidir
         let msg="";try{msg=(await r.json()).error||""}catch{}
-        e.estado="fallido";e.error=msg||("Error "+r.status);try{await IDB.put(e)}catch{}   // el servidor lo rechazó: no se pierde, se muestra para decidir
+        e.estado="fallido";e.error=msg||("Error "+r.status);try{await IDB.put(e)}catch{}
       }
     };
     try{if(navigator.locks)await navigator.locks.request("vye-cola",{ifAvailable:true},async l=>{if(l)await correr()});else await correr()}
     finally{vaciando=false;reconstruir();notificar();pintarEstado()}
   }
-  async function encolar(metodo,col,id,ruta,body){
-    // si ese mismo registro aún está esperando subir, el cambio se funde con él: todavía no es "algo ya guardado"
-    for(let i=cola.length-1;i>=0;i--){const p=cola[i];
-      if(p.usuario!==USR()||p.estado!=="pendiente"||p.col!==col||p.id!==id)continue;
-      if(p.metodo==="PUT"&&metodo==="PUT"){p.body=body}
-      else if(p.metodo==="PUT"&&metodo==="PATCH"){p.body={...p.body,...body}}
-      else if(p.metodo==="PUT"&&metodo==="DELETE"&&!confirmados.has(col+"|"+id)){await quitar(p);reconstruir();notificar();pintarEstado();return}
-      else break;
-      try{await IDB.put(p)}catch{}
-      reconstruir();notificar();pintarEstado();return}
-    const e={usuario:USR(),metodo,col,id,ruta,body,ts:new Date().toISOString(),estado:"pendiente"};
+  // guarda un lote en la cola; un cambio de un solo documento que aún no ha intentado subir se funde con él
+  async function encolar(lote,fundible){
+    if(fundible&&lote.operaciones.length===1){
+      const o=lote.operaciones[0];
+      for(let i=cola.length-1;i>=0;i--){const p=cola[i];
+        if(p.usuario!==USR()||p.estado!=="pendiente"||!p.lote)continue;
+        const j=p.lote.operaciones.findIndex(x=>x.col===o.col&&x.id===o.id);if(j<0)continue;
+        if(p===enviandoAhora)break;   // se está enviando en este momento: no se toca, el cambio va en otra entrada
+        // si ya se intentó subir, pudo haber llegado con la clave anterior: con otros datos lleva clave nueva (si sí llegó,
+        // el servidor lo rechaza por conflicto y queda visible en el panel; nunca se pierde en silencio)
+        if(p.intentado){p.lote.clave=nuevaClave();p.intentado=false}
+        const nuevo=p.lote.operaciones[j].previo===null&&!confirmados.has(o.col+"|"+o.id);   // se había creado sin internet
+        if(o.data===null&&nuevo){p.lote.operaciones.splice(j,1);if(!p.lote.operaciones.length)await quitar(p);else try{await IDB.put(p)}catch{}}
+        else{p.lote.operaciones[j]={...p.lote.operaciones[j],data:o.data};try{await IDB.put(p)}catch{}}
+        reconstruir();notificar();pintarEstado();return}
+    }
+    const e={usuario:USR(),lote,ts:new Date().toISOString(),estado:"pendiente"};
     try{e.n=await IDB.add(e)}catch{const er=new Error("sin conexión");er.code="offline";er.msg="Sin internet, y este equipo no puede guardar en espera. Intenta de nuevo cuando vuelva la conexión.";throw er}
     cola.push(e);reconstruir();notificar();pintarEstado();
   }
   let tAviso=0;
   const avisoGuardado=()=>{if(Date.now()-tAviso<20000)return;tAviso=Date.now();try{window.toast&&window.toast("Sin internet: quedó guardado en este equipo y se sube solo cuando vuelva la conexión.")}catch{}};
+  const necesitaRed=ops=>ops.some(o=>o.col==="config"||o.col==="publicas");
 
-  // una escritura: si hay internet va directo; si no, queda en la cola y se ve igual en pantalla
-  async function escribir(col,id,metodo,body){
-    const ruta=`/docs/${enc(col)}/${enc(id)}`,necesitaRed=col==="config"||col==="publicas";
+  // envía un lote; si no hay internet (o hay cosas esperando subir antes), queda en la cola y se ve igual en pantalla
+  async function enviarOEncolar(lote,fundible){
     await listo;
-    if(!necesitaRed&&(pendientes().length||navigator.onLine===false)){await encolar(metodo,col,id,ruta,body);avisoGuardado();setTimeout(refrescar,0);return null}
-    try{return await api(ruta,{method:metodo,body:body===undefined?undefined:JSON.stringify(body)})}
+    const red=necesitaRed(lote.operaciones);
+    if(!red&&(pendientes().length||navigator.onLine===false)){await encolar(lote,fundible);avisoGuardado();setTimeout(refrescar,0);return null}
+    try{const r=await api("/lote",{method:"POST",body:JSON.stringify(lote)},false,40000);confirmarDocs(r.documentos);return r}
     catch(e){
       if(e.code!=="offline")throw e;
       fueraDeLinea();
-      if(necesitaRed){e.msg="Sin internet: este cambio necesita conexión.";throw e}
-      await encolar(metodo,col,id,ruta,body);avisoGuardado();return null;
+      if(red){e.msg="Sin internet: este cambio necesita conexión.";throw e}
+      await encolar(lote,fundible);avisoGuardado();return null;
     }
+  }
+
+  // ---- escrituras: una sola, o varias juntas como una operación agrupada (todo o nada) ----
+  function enCola(fn){const p=colaEscrituras.then(fn);colaEscrituras=p.catch(()=>{});return p}
+  function preparar(col,id,data){
+    if(!transaccion||transaccion.fase!=="preparando")throw Object.assign(new Error("Hay una operación guardándose. Espera a que termine."),{msg:"Hay una operación guardándose. Espera a que termine."});
+    const k=col+"/"+id,existe=transaccion.operaciones.get(k);
+    transaccion.operaciones.set(k,{col,id,data:data===null?null:copia(data),...(existe?("previo" in existe?{previo:existe.previo}:{}):conPrevio(col,id))});
+    reconstruir();notificar();
+    return data;
+  }
+  async function guardarRemoto(col,id,data){
+    if(transaccion)return preparar(col,id,data);
+    return enCola(async()=>{
+      if(!base&&cargando)await cargando;   // primera carga en curso: se espera para conocer la versión actual del documento
+      const lote={clave:nuevaClave(),operaciones:[{col,id,data,...conPrevio(col,id)}]};
+      const r=await enviarOEncolar(lote,true);
+      return r?r.documentos[0].data:data;
+    });
+  }
+  function atomic(fn){if(transaccion)return Promise.reject(Object.assign(new Error("Ya hay una operación en curso."),{msg:"Ya hay una operación en curso."}));return enCola(()=>atomicDentro(fn))}
+  async function atomicDentro(fn){
+    await listo;
+    if(transaccion)throw Object.assign(new Error("Ya hay una operación en curso."),{msg:"Ya hay una operación en curso."});
+    const tx={operaciones:new Map(),fase:"preparando"};
+    const bloqueo=document.createElement("div");
+    bloqueo.setAttribute("role","status");bloqueo.textContent="Guardando operación…";
+    bloqueo.style.cssText="position:fixed;inset:0;z-index:9999;background:#ffffffcc;display:grid;place-items:center;font:600 18px system-ui";
+    document.body.appendChild(bloqueo);transaccion=tx;
+    try{
+      const resultado=await fn();tx.fase="guardando";   // lo preparado sigue visible mientras se envía
+      const ops=[...tx.operaciones.values()];
+      if(ops.length)await enviarOEncolar({clave:nuevaClave(),operaciones:ops},false);
+      return resultado;
+    }catch(e){transaccion=null;reconstruir();notificar();throw e}   // nada se guardó: la pantalla vuelve a como estaba
+    finally{transaccion=null;bloqueo.remove();reconstruir();notificar()}
   }
   function sub(s){subs.push(s);if(cache)setTimeout(()=>entregar(s),0);else refrescar();return ()=>{const i=subs.indexOf(s);if(i>=0)subs.splice(i,1)}}
   const nuevoId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 
   function docRef(col,id){
+    const ruta=`/docs/${enc(col)}/${enc(id)}`;
     return {id,path:col+"/"+id,
       async get(){
-        if(col==="archivos_img"){const r=await api(`/docs/${enc(col)}/${enc(id)}`).catch(()=>null);return {id,exists:!!r,data:()=>r?.data,metadata:{}}}
-        await refrescar();const d=(cache?.[col]||[]).find(x=>x.id===id);return {id,exists:!!d,data:()=>d?.data,metadata:{}}},
-      async set(data){const body=JSON.parse(JSON.stringify(data)),r=await escribir(col,id,"PUT",body);if(r)confirmar({metodo:"PUT",col,id,body:r.data||body})},
-      async update(data){const r=await escribir(col,id,"PATCH",data);if(r)confirmar({metodo:"PUT",col,id,body:r.data})},
-      async delete(){const r=await escribir(col,id,"DELETE");if(r)confirmar({metodo:"DELETE",col,id})},
+        if(col==="archivos_img"){const r=await api(ruta).catch(()=>null);return {id,exists:!!r,data:()=>r?.data,metadata:{}}}
+        await refrescar();const d=(cache?.[col]||[]).find(x=>x.id===id);return {id,exists:!!d,data:()=>d?copia(d.data):undefined,metadata:{}}},
+      async set(data){return guardarRemoto(col,id,copia(data))},
+      async update(data){const previo=cache?.[col]?.find(x=>x.id===id)?.data;if(!previo)throw new Error("Recarga el documento antes de editarlo");return guardarRemoto(col,id,{...copia(previo),...copia(data)})},
+      async delete(){return guardarRemoto(col,id,null)},
       onSnapshot(cb,err){return sub({tipo:"doc",col,id,cb,err})}};
   }
   function colRef(col,orden){
@@ -203,12 +267,19 @@
       async get(){await refrescar();let snap;const s={tipo:"col",col,orden,cb:x=>snap=x};entregar(s);return snap},
       onSnapshot(cb,err){return sub({tipo:"col",col,orden,cb,err})}};
   }
-  const db={doc(p){const a=p.split("/");return docRef(a.slice(0,-1).join("/"),a[a.length-1])},collection:p=>colRef(p)};
+  async function convertirCotizacion(datos){
+    let r;try{r=await api("/convertir-cotizacion",{method:"POST",body:JSON.stringify(datos)},false,40000)}
+    catch(e){if(e.code==="offline"){fueraDeLinea();e.msg="Convertir una cotización en venta necesita internet.";}throw e}
+    confirmarDocs(r.documentos||[]);return r;
+  }
+  const db={convertirCotizacion,atomic,get enTransaccion(){return !!transaccion},doc(p){const a=p.split("/");return docRef(a.slice(0,-1).join("/"),a[a.length-1])},collection:p=>colRef(p)};
 
   /* ===================== Indicador y panel de "sin internet" ===================== */
   const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const NOM_COL={egresos:"Egreso",ingresos:"Ingreso",traslados:"Traslado",inversion:"Aporte de socio",ventas:"Venta",compras:"Factura de compra",terceros:"Tercero",cuentas:"Cuenta",items:"Producto o servicio",notasdoc:"Nota",asientos:"Comprobante contable",nominas:"Nómina",maquinaria:"Equipo",bodega:"Bodega",cotizaciones:"Cotización",proveedores:"Proveedor",ordenes:"Orden de trabajo",personal:"Empleado",archivos:"Foto o archivo",archivos_img:"Foto",retazos:"Retazo",caja:"Caja",chatarra:"Chatarra",auditoria:"Auditoría"};
-  const resumen=e=>{const b=e.body||{},v=+b.valor||+b.total||0;return [b.concepto,b.nota,b.cliente||b.tercero||b.proveedor||b.nombre||b.socio,v?"$ "+Math.round(v).toLocaleString("es-CO"):""].filter(x=>x&&typeof x==="string").join(" · ").slice(0,90)};
+  // lo principal de un registro en espera (en un lote, el primer documento que no sea configuración)
+  const principal=e=>{const L=opsDe(e),o=L.find(x=>x.col!=="config")||L[0]||{};return {col:o.col,borra:o.data===null,body:o.data||{},mas:L.length-1}};
+  const resumen=e=>{const b=principal(e).body,v=+b.valor||+b.total||0;return [b.concepto,b.nota,b.cliente||b.tercero||b.proveedor||b.nombre||b.socio,v?"$ "+Math.round(v).toLocaleString("es-CO"):""].filter(x=>x&&typeof x==="string").join(" · ").slice(0,90)};
   const hora=t=>{try{return new Date(t).toLocaleString("es-CO",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}catch{return ""}};
   function fueraDeLinea(){if(!sinInternet){sinInternet=true}pintarEstado()}
   function enLinea(){sinInternet=false;ultimoOk=Date.now();desdeCopia=0;pintarEstado()}
@@ -225,7 +296,7 @@
   function pintarPanel(){
     const d=document.getElementById("vye-panel");if(!d)return;
     const P=pendientes(),F=fallidos();
-    const fila=(e,fall)=>`<div style="padding:8px 0;border-top:1px solid #e3e6ea"><div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(NOM_COL[e.col]||e.col)}${e.metodo==="DELETE"?" (borrar)":""}</b><span style="color:#667;font-size:12px">${esc(hora(e.ts))}</span></div><div style="color:#444;font-size:13px">${esc(resumen(e))||"&nbsp;"}</div>${fall?`<div style="color:#b3261e;font-size:13px;margin-top:2px">${esc(e.error||"")}</div><button data-vp="descartar" data-n="${e.n}" style="margin-top:4px;font:inherit;font-size:12px;padding:3px 10px;border:1px solid #c7cdd4;border-radius:6px;background:#fff;cursor:pointer">Descartar</button>`:""}</div>`;
+    const fila=(e,fall)=>`<div style="padding:8px 0;border-top:1px solid #e3e6ea"><div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(NOM_COL[principal(e).col]||principal(e).col||"Registro")}${principal(e).borra?" (borrar)":""}${principal(e).mas?` y ${principal(e).mas} documento${principal(e).mas>1?"s":""} más (se suben juntos)`:""}</b><span style="color:#667;font-size:12px">${esc(hora(e.ts))}</span></div><div style="color:#444;font-size:13px">${esc(resumen(e))||"&nbsp;"}</div>${fall?`<div style="color:#b3261e;font-size:13px;margin-top:2px">${esc(e.error||"")}</div><button data-vp="descartar" data-n="${e.n}" style="margin-top:4px;font:inherit;font-size:12px;padding:3px 10px;border:1px solid #c7cdd4;border-radius:6px;background:#fff;cursor:pointer">Descartar</button>`:""}</div>`;
     d.innerHTML=`<div style="width:min(560px,100%);max-height:88vh;overflow:auto;background:#fff;border-radius:14px;padding:18px;font:14px system-ui,sans-serif;color:#1f2326;box-shadow:0 20px 60px rgba(0,0,0,.35)">
       <div style="display:flex;justify-content:space-between;align-items:start;gap:8px"><div><h2 style="margin:0 0 4px;font-size:18px">${sinInternet?"Sin conexión a internet":"Registros por subir"}</h2>
       <div style="color:#556;font-size:13px">${sinInternet?`Puedes seguir registrando: todo queda guardado en este equipo y se sube solo cuando vuelva el internet. ${desdeCopia?"Los datos que ves son de la última vez que hubo conexión ("+esc(hora(desdeCopia))+").":""}`:"Se suben en el mismo orden en que se registraron."}</div></div><button data-vp="cerrar" style="border:0;background:none;font-size:22px;line-height:1;cursor:pointer" aria-label="Cerrar">×</button></div>
